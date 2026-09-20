@@ -1,6 +1,6 @@
 # Examples
 
-24 programs, grouped by their main feature. Many deliberately combine several features; the table below lists those connections. Run commands from the repository root after building Cterpreter.
+30 programs, grouped by their main feature. Many deliberately combine several features; the table below lists those connections. Run commands from the repository root after building Cterpreter.
 
 ```sh
 ./build/Cterpreter examples/basics/hello.c Ada
@@ -12,9 +12,10 @@
 ./build/Cterpreter examples/types/aggregates.c
 ./build/Cterpreter examples/types/function_pointers.c
 ./build/Cterpreter examples/types/numeric_types.c
+./build/Cterpreter --max-steps 900000000 examples/playground/donut.c
 ```
 
-For the more involved programs, start with merge sort, N-Queens, the growing vector, shortest paths, or the stack machine. For the type system, start with the aggregate, function-pointer, and numeric-type programs.
+For the more involved programs, start with merge sort, N-Queens, the growing vector, shortest paths, or the stack machine. For the type system, start with the aggregate, function-pointer, and numeric-type programs. For something to play with rather than read, go to [the playground](#playground).
 
 ## Program index
 
@@ -41,6 +42,12 @@ For the more involved programs, start with merge sort, N-Queens, the growing vec
 | [io/csv_report.c](io/csv_report.c) | `fopen`, `fgets`, `sscanf`, account aggregation, floating-point formatting | 6 transactions, 3 accounts, total 125.00 |
 | [io/file_roundtrip.c](io/file_roundtrip.c) | Exclusive file creation, block I/O, flushing/seeking, `memcmp`, cleanup via `goto` | Restores five integers with checksum 131; removes its file |
 | [io/calculator.c](io/calculator.c) | Formatted stdin, `switch`, EOF, recoverable division-by-zero handling | Prints results for supplied calculations |
+| [playground/donut.c](playground/donut.c) | Rotating-torus raymarching, `math.h`, z-buffering, ANSI cursor control | A spinning ASCII donut, 48 frames by default |
+| [playground/life.c](playground/life.c) | Toroidal grids, double buffering, neighbour counting, pattern seeding | A Gosper glider gun firing gliders that wrap and collide |
+| [playground/brainfuck.c](playground/brainfuck.c) | An interpreter inside an interpreter: bracket matching, a tape, a dispatch loop | `Hello World!`, the first eleven squares, A–Z, or a Sierpinski triangle |
+| [playground/maze.c](playground/maze.c) | Recursive backtracking, an explicit direction shuffle, recursive DFS solving | A carved maze, then the same maze with its route marked in dots |
+| [playground/adventure.c](playground/adventure.c) | Structures, function-pointer verb dispatch, `strtok`, `fgets`, game state | A small text adventure set inside a C interpreter |
+| [playground/toolkit.c](playground/toolkit.c) | A dozen callable curiosities meant for `.load` rather than for running | Prints a menu of things to call from the REPL |
 
 The graph is stored in one flat array using `row * NODES + column`, and the vector uses separate pointer, length, and capacity variables; both predate aggregate support and still run unchanged. The `types` programs use structures and multidimensional arrays directly.
 
@@ -75,6 +82,42 @@ printf '12 + 7\n9 / 2\n5 * 6\n8 / 0\n' | ./build/Cterpreter examples/io/calculat
 
 It prints 19, 4, and 30 for the first three calculations, then reports the division by zero and keeps reading. When entering input interactively, Ctrl+D finishes.
 
+## Playground
+
+These are here to be played with. Several want more than the default execution budget, so start the interpreter with a larger one:
+
+```sh
+./build/Cterpreter --max-steps 900000000 examples/playground/donut.c 48
+./build/Cterpreter --max-steps 900000000 examples/playground/life.c gun 200
+./build/Cterpreter --max-steps 900000000 examples/playground/life.c soup 150 42
+./build/Cterpreter --max-steps 900000000 examples/playground/brainfuck.c triangle
+./build/Cterpreter --max-steps 900000000 examples/playground/brainfuck.c '++++++++++[>++++++<-]>++++.---.+++++++..'
+./build/Cterpreter examples/playground/maze.c 7
+./build/Cterpreter --max-depth 8192 --max-steps 900000000 examples/playground/maze.c 7 79 39
+./build/Cterpreter examples/playground/adventure.c
+```
+
+The donut animates in place, so give the terminal at least 24 rows. Life takes a pattern name — `gun`, `acorn`, `r`, `diehard`, or `soup` with a seed. Brainfuck takes a catalogue name — `hello`, `squares`, `alphabet`, `triangle` — or any Brainfuck program as a single argument. The maze takes a seed and optional odd dimensions; the big one recurses deeper than the default frame budget allows.
+
+The adventure is played at a prompt. You wake up inside a C interpreter and have to get out through `main()`; `help` lists the verbs. Entering Undefined Behaviour without a cast ends about as well as it does in real C.
+
+The toolkit is different: it is meant to be loaded into a live session rather than run.
+
+```sh
+./build/Cterpreter --max-steps 900000000
+c> .load examples/playground/toolkit.c
+c> mandel(-0.75, 0.0, 3.0)
+c> mandel(-0.745, 0.113, 0.02)
+c> bifurcation()
+c> collatz(27)
+c> roman(1987)
+c> hanoi(4, 'A', 'C', 'B')
+c> bogosort(6, 1)
+c> ackermann(3, 6)
+```
+
+Loading it prints the menu and leaves every function defined in the session, so you can call them with your own arguments, redefine them, or build on them. `ackermann(3, 6)` is included because it is the fastest way to meet the step limit on purpose.
+
 ## Intentional diagnostics
 
 These three programs are expected to fail with exit status 1. They demonstrate Cterpreter diagnostics, so they are excluded from comparisons with native execution.
@@ -91,4 +134,8 @@ These three programs are expected to fail with exit status 1. They demonstrate C
 
 ## Verification
 
-The 21 successful programs were compiled as C17 with GCC on Linux and their stdout, stderr, and exit statuses compared against Cterpreter using the documented sample inputs. All matched byte for byte. The three diagnostic examples produced their expected errors. The comparison runs as the `reference_programs` CTest check, so it is repeated on every test run. These examples demonstrate supported behavior; they do not establish full C17 conformance.
+27 of the successful programs were compiled as C17 with GCC on Linux and their stdout, stderr, and exit statuses compared against Cterpreter using the documented sample inputs. All matched byte for byte, the donut included, which pins several thousand floating-point results at once. The three diagnostic examples produced their expected errors. The comparison runs as the `reference_programs` CTest check, so it is repeated on every test run.
+
+The maze and Life's random soup are excluded from that comparison. `rand()` is Cterpreter's own generator, kept per interpreter instance so that nested instances stay independent, so a seeded run is reproducible in Cterpreter but does not match the host's sequence.
+
+These examples demonstrate supported behavior; they do not establish full C17 conformance.

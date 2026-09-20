@@ -4,7 +4,7 @@ C, but interpreted. A C17 implementation of a C interpreter, with a persistent R
 
 Cterpreter evaluates its own AST; it does not invoke a compiler to execute your program. It runs C programs that use the full scalar type system, structures, unions, enumerations, multidimensional arrays, function pointers, macros, and a useful subset of the standard library. Full C17 and self-interpretation remain unfinished.
 
-Current status: [Misendeavor log](PROGRESS.md). Browse the [feature-organized examples](examples/README.md) for runnable programs and expected results.
+Current status: [Misendeavor log](PROGRESS.md). Browse the [feature-organized examples](examples/README.md) for runnable programs and expected results, or go straight to the [playground](examples/README.md#playground) for a spinning ASCII donut, Conway's Game of Life, a Brainfuck interpreter running inside this one, a maze generator, and a text adventure set inside a C interpreter.
 
 ## Build
 
@@ -74,7 +74,7 @@ printf 'int x = 6; x * 7\n' | ./build/Cterpreter
 
 Files and piped source run `main` automatically when it exists. Both `int main(void)` and `int main(int argc, char **argv)` are supported; the return value becomes the process exit status. Top-level Cterpreter statements are also allowed. Source supplied with `-e` evaluates directly, without automatically calling `main`.
 
-`--no-prompt` selects a line-oriented REPL even with redirected input. Other options include `--history FILE`, `--color auto|always|never`, `--max-steps N`, `--max-depth N`, `--max-nesting N`, `--strict`, and `--verbose`. `NO_COLOR` disables automatic colors. `--help` lists all options.
+`--no-prompt` selects a line-oriented REPL even with redirected input. Other options include `--history FILE`, `--color auto|always|never`, `--max-steps N` (any size), `--max-depth N` (up to 8192), `--max-nesting N` (up to 64), `--strict`, and `--verbose`. `NO_COLOR` disables automatic colors. `--help` lists all options.
 
 `--strict` turns an invalid memory access into the `SIGSEGV` the program would have earned natively, after printing the diagnostic, instead of reporting it and stopping cleanly.
 
@@ -115,7 +115,7 @@ The runtime includes:
 - File opening/closing, line and block I/O, seeking, flushing, EOF/error queries, `ungetc`, `remove`, and `rename`. Open files are closed when the interpreter is cleared or destroyed.
 - `stdin`, `stdout`, `stderr`, an assignable `errno`, `perror`, `strerror`, and `getenv`. Standard streams remain owned by the interpreter.
 - `strlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`, `strcat`, `strncat`, `strchr`, `strrchr`, `strstr`, `strspn`, `strcspn`, `strpbrk`, `strtok`, `memcpy`, `memmove`, `memset`, `memcmp`, and `memchr`.
-- Allocation functions, `atoi`, `atol`, `atof`, `strtol`, `strtod`, `abs`, `labs`, `rand`, `srand`, `exit`, `abort`, and `assert`.
+- Allocation functions, `atoi`, `atol`, `atof`, `strtol`, `strtod`, `abs`, `labs`, `rand`, `srand`, `exit`, `abort`, and `assert`. `strtoul` and the wide-character functions are not implemented.
 - `qsort` and `bsearch`, which call interpreted comparison functions through function pointers.
 - Math functions, including roots, powers, trigonometric and hyperbolic functions, logs, rounding, `fmod`, `fmin`/`fmax`, and `copysign`.
 - Character classification/conversion functions, `time`, `difftime`, and `clock`.
@@ -130,11 +130,13 @@ Semantic checking largely happens during execution. Operand/argument evaluation 
 
 There is no dynamic-library interface, clangd/LSP connection, native assembly backend, or debugger. Completions, signatures, and live diagnostics come from Cterpreter's own symbol table and parser, not from clangd. The standard library is a subset; scanf scansets and wide-character formats are not implemented. `.type` and `.ast` use the current macros and type aliases without executing the inspected source.
 
-Defaults are 1 MiB of source per submission, 64 MiB of live managed object data, one million execution steps, 256 evaluation frames, and 8 levels of `interpret()` nesting. There are separate syntax/macro/include nesting limits and a 4096-entry limit on distinct types. These are resource bounds, not a security sandbox. Interpreter instances have separate symbols, macros, memory, file handles, and random-number state; the type descriptions themselves are shared and released when the last instance is destroyed.
+Defaults are 1 MiB of source per submission, 64 MiB of live managed object data, one million execution steps, 2048 evaluation frames, and 8 levels of `interpret()` nesting. `--max-depth` counts nested AST evaluations rather than function calls, so one level of interpreted recursion costs several frames; nested interpreters share one frame budget because they share the host stack. There are separate syntax/macro/include nesting limits and a 4096-entry limit on distinct types. These are resource bounds, not a security sandbox. Interpreter instances have separate symbols, macros, memory, file handles, and random-number state; the type descriptions themselves are shared and released when the last instance is destroyed. `rand` is Cterpreter's own generator rather than the host's, so a seeded sequence is reproducible here but differs from the same program compiled natively.
 
 ## Development
 
 `include/cterpreter.h` exposes the embedding API. The lexer, parser, type registry, preprocessor, evaluator, managed memory, library adapters, boot ceremony, and terminal editor live in `src/`. Host streams, execution limits, nesting, and strict mode are configurable per interpreter.
+
+Objects live in a table kept sorted by address, so a memory access is a binary search rather than a walk of every allocation ever made. Freed objects stay in that table, which is what lets an access report that a lifetime ended rather than that a pointer was never valid; only the most recent few thousand deaths are kept, so a long-running loop cannot grow the table without bound.
 
 Strict Clang/GCC warnings are enabled. The test suite covers the lexer and parser directly, pins integer boundaries and conversions, fuzzes malformed input, and compares every example against the host compiler's own output. CI is configured for GCC and Clang on Linux and Apple Clang on macOS; these hosted runs have not been executed in this workspace.
 

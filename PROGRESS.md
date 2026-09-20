@@ -17,20 +17,28 @@ The interpreter gained a real type system. Types are now interned descriptions i
 - `--strict`, which raises the `SIGSEGV` an invalid access would have earned natively after printing the diagnostic.
 - Completions drawn from the session's own globals, macros, and library names; a signature hint for the call the cursor sits inside; and the first diagnostic in the current line, all produced by parsing the input without executing it.
 - The ceremonial `volatile` inline-assembly `nop` and 2 + 2 verification through AVX-512 ZMM lanes or ARM NEON lanes where the host provides them.
+- A `playground` folder of six programs written to be played with rather than read: a rotating ASCII donut, Conway's Game of Life with a Gosper glider gun, a Brainfuck interpreter running inside this one, a recursive maze generator and solver, a text adventure set inside a C interpreter, and a toolkit of curiosities meant to be `.load`ed into a live session.
+
+### Fixed while building the playground
+
+- Object lookup was a linear walk of every allocation ever made, and freed objects were never reclaimed, so any program that declared a variable inside a loop was quadratic in the number of iterations. Objects now live in a table kept sorted by address and found by binary search, and all but the most recent few thousand dead entries are dropped. A loop of 16,000 iterations declaring two locals went from 2.7 seconds to 0.02; one frame of the donut went from 26 seconds to 0.16.
+- `--max-depth` counts nested AST evaluations rather than function calls, so one level of interpreted recursion costs several frames and the old default of 256 refused a recursion only a hundred deep. The default is now 2048 and the ceiling 8192, which was measured against the host stack: 16,384 frames still run, and the first overflow appears above 20,000.
+- A nested interpreter was given the caller's whole frame budget while sharing the caller's host stack, so a deep chain of `interpret()` calls could overflow it. A child now inherits the caller's remaining frames, exactly as it already inherited the remaining step budget.
 
 ### Verification
 
 - 7 CTest checks pass, in both the normal build and the AddressSanitizer/UndefinedBehaviorSanitizer build: core smoke tests, example programs, lexer/parser unit tests, arithmetic boundary tests, fuzzing, reference comparison, and the reproducible-build check.
 - New direct unit tests cover tokens, literal types, escapes, source positions, parse statuses, and AST shape; new arithmetic tests pin promotion, conversion, wraparound, and boundary behavior.
 - Fuzzing feeds generated C fragments and random bytes through a session and requires a diagnostic and a still-usable session, never a crash or a hang. It runs clean across many seeds under sanitizers, and builds as a libFuzzer target with `-DCT_FUZZER=ON`.
-- All 21 successful examples match native GCC-compiled C17 output and exit status byte for byte, now as a CTest check rather than a manual comparison. The three diagnostic examples still produce their intended errors.
+- 27 successful examples match native GCC-compiled C17 output and exit status byte for byte, now as a CTest check rather than a manual comparison. That includes the donut, which pins several thousand floating-point results at once. The maze and Life's random soup are excluded because `rand` is Cterpreter's own generator. The three diagnostic examples still produce their intended errors.
 - Two copies of the source tree at different paths produce a byte-identical core archive.
 - The REPL's hints, completions, and live diagnostics were exercised through a pseudo-terminal.
-- The examples collection is now **24 C programs in ten feature folders**: 21 successful programs and three deliberate diagnostic failures. The three new `types` programs cover aggregates, function pointers, and the numeric tower.
+- The examples collection is now **30 C programs in ten feature folders**: 27 successful programs and three deliberate diagnostic failures. The three new `types` programs cover aggregates, function pointers, and the numeric tower; the six `playground` programs exist to be poked at.
 
 ### Still unfinished
 
 - Bit-fields, `long double`, complex numbers, `_Atomic`, variable-length arrays, variadic interpreted functions, and `va_list`.
+- `strtoul` and the wide-character library, noticed as missing while writing the playground.
 - `volatile` and `restrict` are parsed and ignored; `extern` declares rather than references. `const` is modelled; the other qualifiers are not.
 - A standalone semantic type checker. Checking still happens largely during execution, so invalid constructs in unexecuted branches can escape it.
 - Accurate original-source locations through includes and macro expansion, and the rest of the C17 preprocessing rules.

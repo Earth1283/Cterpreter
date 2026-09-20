@@ -17,14 +17,22 @@ compare() {
     source=$root/$1
     shift
     input=/dev/null
-    if [ "${1:-}" = "--stdin" ]; then input=$2; shift 2; fi
+    flags=
+    while :; do
+        case ${1:-} in
+            --stdin) input=$2; shift 2 ;;
+            --flags) flags=$2; shift 2 ;;
+            *) break ;;
+        esac
+    done
     if ! "$compiler" -std=c17 -w -o "$work/native" "$source" -lm 2>"$work/compile.log"; then
         echo "skip $source (the reference compiler rejected it)"
         return
     fi
     "$work/native" "$@" <"$input" >"$work/native.out" 2>&1
     native_status=$?
-    "$interpreter" "$source" "$@" <"$input" >"$work/interpreted.out" 2>&1
+    # shellcheck disable=SC2086
+    "$interpreter" $flags "$source" "$@" <"$input" >"$work/interpreted.out" 2>&1
     interpreted_status=$?
     if [ "$native_status" != "$interpreted_status" ] || ! cmp -s "$work/native.out" "$work/interpreted.out"; then
         echo "FAIL $source (native $native_status, interpreted $interpreted_status)"
@@ -56,6 +64,18 @@ compare examples/types/function_pointers.c
 compare examples/types/numeric_types.c
 compare examples/io/csv_report.c
 compare examples/io/calculator.c --stdin "$work/calculator.in"
+
+# The playground programs need room to run. Those that call rand() are left out:
+# Cterpreter's generator is its own, so a seeded run cannot match the host's.
+printf 'n\ntake semicolon\ne\nn\ntake cast\ne\nn\ne\ne\nn\ntake return\nuse return\n' >"$work/adventure.in"
+big="--max-steps 900000000 --max-depth 8192"
+compare examples/playground/donut.c --flags "$big" 4
+compare examples/playground/life.c --flags "$big" gun 25
+compare examples/playground/brainfuck.c --flags "$big" hello
+compare examples/playground/brainfuck.c --flags "$big" squares
+compare examples/playground/brainfuck.c --flags "$big" triangle
+compare examples/playground/toolkit.c --flags "$big"
+compare examples/playground/adventure.c --stdin "$work/adventure.in"
 
 for diagnostic in "$root"/examples/diagnostics/*.c; do
     "$interpreter" "$diagnostic" >/dev/null 2>&1

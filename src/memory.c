@@ -4,6 +4,39 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Freed objects stay in the table so that a later access can say the lifetime
+ * ended rather than that the pointer was never valid. Only the most recent
+ * deaths are worth that much memory in a long-running loop; older ones are
+ * forgotten and their addresses report an invalid access instead. */
+#define REMEMBERED_DEAD 4096
+
+static void forget_oldest_dead(Memory *memory) {
+    size_t split = memory->count, remembered = 0;
+    while (split && remembered < REMEMBERED_DEAD)
+        if (!memory->entries[--split]->alive) ++remembered;
+    size_t kept = 0;
+    for (size_t i = 0; i < split; ++i) {
+        Allocation *allocation = memory->entries[i];
+        if (allocation->alive) memory->entries[kept++] = allocation;
+        else { free(allocation); --memory->dead; }
+    }
+    memmove(memory->entries + kept, memory->entries + split, (memory->count - split) * sizeof *memory->entries);
+    memory->count = kept + memory->count - split;
+}
+
+static int remember(Memory *memory, Allocation *allocation) {
+    if (memory->dead > 2 * REMEMBERED_DEAD) forget_oldest_dead(memory);
+    if (memory->count == memory->capacity) {
+        size_t capacity = memory->capacity ? memory->capacity * 2 : 64;
+        Allocation **entries = realloc(memory->entries, capacity * sizeof *entries);
+        if (!entries) return 0;
+        memory->entries = entries;
+        memory->capacity = capacity;
+    }
+    memory->entries[memory->count++] = allocation;
+    return 1;
+}
+
 uint64_t memory_allocate(Memory *memory, size_t size, int zero, int heap) {
     memory->error = NULL;
     if (size > 64u * 1024u * 1024u || memory->bytes > 64u * 1024u * 1024u - size) {
@@ -15,7 +48,7 @@ uint64_t memory_allocate(Memory *memory, size_t size, int zero, int heap) {
         allocation->data = calloc(size ? size : 1, 1);
         allocation->initialized = malloc(size ? size : 1);
     }
-    if (!allocation || !allocation->data || !allocation->initialized) {
+    if (!allocation || !allocation->data || !allocation->initialized || !remember(memory, allocation)) {
         if (allocation) { free(allocation->data); free(allocation->initialized); }
         free(allocation);
         memory->error = "out of memory";
@@ -28,17 +61,23 @@ uint64_t memory_allocate(Memory *memory, size_t size, int zero, int heap) {
     allocation->size = size;
     allocation->alive = 1;
     allocation->heap = heap;
-    allocation->next = memory->allocations;
-    memory->allocations = allocation;
     memory->bytes += size;
     return allocation->address;
 }
 
+/* Addresses are handed out in increasing order and separated by at least
+ * sixteen bytes, so the table stays sorted and one object's one-past-the-end
+ * address can never belong to the next object. */
 Allocation *memory_find(Memory *memory, uint64_t address) {
-    for (Allocation *allocation = memory->allocations; allocation; allocation = allocation->next)
-        if (address >= allocation->address && address - allocation->address <= allocation->size)
-            return allocation;
-    return NULL;
+    size_t low = 0, high = memory->count;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (memory->entries[middle]->address <= address) low = middle + 1;
+        else high = middle;
+    }
+    if (!low) return NULL;
+    Allocation *allocation = memory->entries[low - 1];
+    return address - allocation->address <= allocation->size ? allocation : NULL;
 }
 
 void *memory_access(Memory *memory, uint64_t address, size_t size, int write) {
@@ -75,6 +114,7 @@ int memory_release(Memory *memory, uint64_t address, int heap_only) {
     allocation->data = NULL;
     allocation->initialized = NULL;
     allocation->alive = 0;
+    ++memory->dead;
     memory->bytes -= allocation->size;
     return 1;
 }
@@ -150,13 +190,11 @@ char *memory_string(Memory *memory, uint64_t address) {
 }
 
 void memory_destroy(Memory *memory) {
-    Allocation *allocation = memory->allocations;
-    while (allocation) {
-        Allocation *next = allocation->next;
-        free(allocation->data);
-        free(allocation->initialized);
-        free(allocation);
-        allocation = next;
+    for (size_t i = 0; i < memory->count; ++i) {
+        free(memory->entries[i]->data);
+        free(memory->entries[i]->initialized);
+        free(memory->entries[i]);
     }
+    free(memory->entries);
     *memory = (Memory){0};
 }

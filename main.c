@@ -336,7 +336,7 @@ static void usage(FILE *stream) {
           "  --history FILE    Choose a history file\n"
           "  --no-history      Disable persistent history\n"
           "  --max-steps N     Set the execution step limit\n"
-          "  --max-depth N     Set the evaluation depth limit (up to 1024)\n"
+          "  --max-depth N     Set the evaluation depth limit (up to 8192)\n"
           "  --max-nesting N   Set how deep interpret() may nest (up to 64)\n"
           "  --strict          Raise SIGSEGV on an invalid access instead of diagnosing it\n"
           "  --verbose         Show initialization details\n"
@@ -356,7 +356,7 @@ static int positive(const char *text, size_t maximum, size_t *result) {
 }
 
 int main(int argc, char **argv) {
-    Application app = {.prompt = "c> ", .steps = 1000000, .depth = 256, .nesting = 8};
+    Application app = {.prompt = "c> ", .steps = 1000000, .depth = 2048, .nesting = 8};
     const char *path = NULL, *source = NULL, *color_mode = "auto";
     int quiet_repl = 0, path_index = 0, no_history = 0;
     for (int i = 1; i < argc; ++i) {
@@ -377,7 +377,7 @@ int main(int argc, char **argv) {
             else if (!strcmp(argument, "--history")) app.history_path = value;
             else {
                 size_t limit;
-                size_t maximum = !strcmp(argument, "--max-depth") ? 1024 : !strcmp(argument, "--max-nesting") ? 64 : SIZE_MAX;
+                size_t maximum = !strcmp(argument, "--max-depth") ? 8192 : !strcmp(argument, "--max-nesting") ? 64 : SIZE_MAX;
                 if (!positive(value, maximum, &limit)) { fputs("error: invalid execution limit\n", stderr); return 2; }
                 if (!strcmp(argument, "--max-depth")) app.depth = (unsigned)limit;
                 else if (!strcmp(argument, "--max-nesting")) app.nesting = (unsigned)limit;

@@ -9,11 +9,11 @@ struct Allocation {
     size_t size;
     unsigned char *data, *initialized;
     int alive, heap, readonly;
-    Allocation *next;
 };
 
 typedef struct {
-    Allocation *allocations;
+    Allocation **entries;
+    size_t count, capacity, dead;
     uint64_t next_address;
     size_t bytes;
     const char *error;

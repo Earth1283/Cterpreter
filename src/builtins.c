@@ -801,9 +801,11 @@ static CtValue interpret(CtInterpreter *interpreter, Token name, CtValue argumen
     CtInterpreter *child = ct_create();
     if (!child) { free(source.data); return runtime_error(interpreter, name, "out of memory"); }
     size_t budget = interpreter->step_limit > interpreter->steps ? interpreter->step_limit - interpreter->steps : 1;
+    /* Nested instances run on the same host stack, so they share one depth budget. */
+    unsigned frames = interpreter->depth_limit > interpreter->depth ? interpreter->depth_limit - interpreter->depth : 1;
     ct_set_streams(child, interpreter->input, interpreter->output, interpreter->errors);
     ct_set_interrupt(child, interpreter->interrupt);
-    ct_set_limits(child, budget, interpreter->depth_limit);
+    ct_set_limits(child, budget, frames);
     ct_set_nesting(child, interpreter->nesting + 1, interpreter->nesting_limit);
     ct_set_strict(child, interpreter->strict);
     ct_set_filename(child, path);
