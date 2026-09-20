@@ -8,16 +8,19 @@
 typedef struct Symbol Symbol;
 struct Symbol {
     char *name;
-    size_t length, count;
+    size_t length;
     CtValue value;
     uint64_t address;
-    int is_array, is_static, is_const, enum_constant;
+    int is_static, is_const, enum_constant;
     Node *function;
     Symbol *next;
 };
 
+typedef struct Temporary Temporary;
+struct Temporary { uint64_t address; Temporary *next; };
+
 typedef struct Scope Scope;
-struct Scope { Symbol *symbols; Scope *parent; };
+struct Scope { Symbol *symbols; Temporary *temporaries; Scope *parent; };
 
 typedef struct HostFile HostFile;
 struct HostFile {
@@ -25,6 +28,14 @@ struct HostFile {
     FILE *stream;
     int standard, closed;
     HostFile *next;
+};
+
+/* Interpreted functions are reachable through pointers by their object address. */
+typedef struct FunctionRef FunctionRef;
+struct FunctionRef {
+    uint64_t address;
+    Node *definition;
+    FunctionRef *next;
 };
 
 struct CtInterpreter {
@@ -39,9 +50,10 @@ struct CtInterpreter {
     FILE *input, *output, *errors;
     unsigned depth, depth_limit;
     size_t steps, step_limit;
-    int failed, exit_requested, exit_status, error_number;
+    int failed, exit_requested, exit_status, error_number, strict;
     unsigned random_state;
     HostFile *files;
+    FunctionRef *functions;
 };
 
 CtValue runtime_error(CtInterpreter *interpreter, Token token, const char *message);

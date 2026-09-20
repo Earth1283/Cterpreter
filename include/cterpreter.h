@@ -6,11 +6,12 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define CT_VERSION "0.2.0"
+#define CT_VERSION "0.3.0"
 #define CT_SOURCE_LIMIT (1024u * 1024u)
 
 typedef struct CtInterpreter CtInterpreter;
-typedef enum { CT_INT, CT_DOUBLE, CT_CHAR, CT_VOID, CT_POINTER = 16 } CtType;
+typedef int CtType;
+enum { CT_INT, CT_DOUBLE, CT_CHAR, CT_VOID };
 typedef struct {
     CtType type;
     union { int integer; double real; uint64_t address; } as;
@@ -44,5 +45,9 @@ size_t ct_type_size(CtType type);
 CtStatus ct_eval(CtInterpreter *interpreter, const char *source,
                  CtValue *result, int *has_result, CtError *error);
 void ct_format_value(CtValue value, char *buffer, size_t capacity);
+/* Like ct_format_value, but able to read interpreter memory to expand aggregates. */
+void ct_print_value(CtInterpreter *interpreter, CtValue value, char *buffer, size_t capacity);
+void ct_set_strict(CtInterpreter *interpreter, int strict);
+unsigned ct_depth(CtInterpreter *interpreter);
 
 #endif

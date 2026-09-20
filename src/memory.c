@@ -1,17 +1,8 @@
 #include "memory.h"
+#include "types.h"
 
 #include <stdlib.h>
 #include <string.h>
-
-size_t ct_type_size(CtType type) {
-    if (type >= CT_POINTER) return sizeof(uint64_t);
-    switch (type) {
-        case CT_INT: return sizeof(int);
-        case CT_DOUBLE: return sizeof(double);
-        case CT_CHAR: return sizeof(char);
-        default: return 0;
-    }
-}
 
 uint64_t memory_allocate(Memory *memory, size_t size, int zero, int heap) {
     memory->error = NULL;
@@ -91,11 +82,11 @@ int memory_release(Memory *memory, uint64_t address, int heap_only) {
 CtValue memory_read(Memory *memory, uint64_t address, CtType type) {
     CtValue value = {.type = type};
     size_t size = ct_type_size(type);
-    if (!size) { memory->error = "cannot read a void object"; return value; }
-    if (address % size) { memory->error = "misaligned memory access"; return value; }
+    if (!type_is_scalar(type)) { memory->error = "cannot read a void or aggregate object directly"; return value; }
+    if (address % ct_type_align(type)) { memory->error = "misaligned memory access"; return value; }
     void *data = memory_access(memory, address, size, 0);
     if (!data) return value;
-    if (type >= CT_POINTER) memcpy(&value.as.address, data, size);
+    if (type_is_pointer(type)) memcpy(&value.as.address, data, size);
     else if (type == CT_DOUBLE) memcpy(&value.as.real, data, size);
     else if (type == CT_CHAR) value.as.integer = *(char *)data;
     else memcpy(&value.as.integer, data, size);
@@ -104,11 +95,11 @@ CtValue memory_read(Memory *memory, uint64_t address, CtType type) {
 
 int memory_write(Memory *memory, uint64_t address, CtValue value) {
     size_t size = ct_type_size(value.type);
-    if (!size) { memory->error = "cannot write a void object"; return 0; }
-    if (address % size) { memory->error = "misaligned memory access"; return 0; }
+    if (!type_is_scalar(value.type)) { memory->error = "cannot write a void or aggregate object directly"; return 0; }
+    if (address % ct_type_align(value.type)) { memory->error = "misaligned memory access"; return 0; }
     void *data = memory_access(memory, address, size, 1);
     if (!data) return 0;
-    if (value.type >= CT_POINTER) memcpy(data, &value.as.address, size);
+    if (type_is_pointer(value.type)) memcpy(data, &value.as.address, size);
     else if (value.type == CT_DOUBLE) memcpy(data, &value.as.real, size);
     else if (value.type == CT_CHAR) *(char *)data = (char)value.as.integer;
     else memcpy(data, &value.as.integer, size);

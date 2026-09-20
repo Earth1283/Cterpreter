@@ -2,14 +2,19 @@
 #define CT_PARSER_H
 
 #include "lexer.h"
+#include "types.h"
 
 typedef enum {
     N_VALUE, N_NAME, N_UNARY, N_POSTFIX, N_BINARY, N_CONDITIONAL, N_CALL,
     N_DECLARATION, N_EXPRESSION, N_BLOCK, N_IF, N_WHILE, N_FOR,
     N_RETURN, N_BREAK, N_CONTINUE, N_FUNCTION, N_EMPTY, N_STRING, N_INDEX,
     N_CAST, N_SIZEOF, N_ALIGNOF, N_GROUP, N_INITIALIZER, N_DO,
-    N_SWITCH, N_CASE, N_GOTO, N_LABEL, N_TYPEDEF, N_ENUMERATOR, N_GENERIC, N_ASSOCIATION
+    N_SWITCH, N_CASE, N_GOTO, N_LABEL, N_TYPEDEF, N_ENUMERATOR, N_GENERIC, N_ASSOCIATION,
+    N_MEMBER, N_COMPOUND, N_DESIGNATED, N_DESIGNATOR
 } NodeKind;
+
+/* Tags share a namespace per kind; TAG_NAME covers typedef names. */
+typedef enum { TAG_NAME, TAG_ENUM, TAG_STRUCT, TAG_UNION } TagKind;
 
 typedef struct Node Node;
 struct Node {
@@ -18,7 +23,7 @@ struct Node {
     CtType type;
     char *text;
     size_t text_length;
-    int is_array, is_static, is_const, terminated, enum_tag;
+    int is_static, is_const, terminated, tag_kind, local, through_pointer, variadic;
     uint64_t address;
     Node *left, *right, *third, *fourth, *next;
     Node *allocated_next;

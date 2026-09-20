@@ -1,8 +1,15 @@
 #include "parser.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define TAG_CONSTANT 4
+#define SUFFIX_LIMIT 8
+
+typedef struct Alias Alias;
+struct Alias { Node *node; unsigned scope; Alias *next; };
 
 typedef struct {
     Lexer lexer;
@@ -12,9 +19,12 @@ typedef struct {
     CtError *error;
     CtStatus status;
     size_t nodes;
-    unsigned depth, loops, functions, switches;
+    unsigned depth, loops, functions, switches, scope;
+    Alias *aliases;
     CtType function_type;
 } Parser;
+
+typedef struct { Lexer lexer; Token token; } Position;
 
 static void fail(Parser *parser, const char *message) {
     if (parser->status != CT_OK) return;
@@ -41,6 +51,9 @@ static int accept(Parser *parser, int kind) {
 static void expect(Parser *parser, int kind, const char *message) {
     if (!accept(parser, kind)) fail(parser, message);
 }
+
+static Position mark(const Parser *parser) { return (Position){parser->lexer, parser->token}; }
+static void restore(Parser *parser, Position position) { parser->lexer = position.lexer; parser->token = position.token; }
 
 static Node *node(Parser *parser, NodeKind kind, Token token) {
     if (parser->status != CT_OK) return NULL;
@@ -86,6 +99,9 @@ static int precedence(int kind) {
 
 static Node *expression(Parser *parser, int minimum);
 static Node *statement(Parser *parser, int top_level);
+static Node *initializer(Parser *parser);
+static CtType type_specifier(Parser *parser, int *is_static, int *is_const, Node ***tail);
+static CtType declarator(Parser *parser, CtType base, Token *name, Node **parameters, int *variadic);
 
 static int enter(Parser *parser) {
     if (++parser->depth <= 128) return 1;
@@ -95,22 +111,366 @@ static int enter(Parser *parser) {
     return 0;
 }
 
-static Node *type_alias(Parser *parser, Token token, int enum_tag) {
-    for (const Unit *unit = parser->unit; unit; unit = unit == parser->unit ? parser->previous : unit->next)
-        for (Node *node = unit->allocations; node; node = node->allocated_next)
-            if (node->kind == N_TYPEDEF && node->enum_tag == enum_tag && node->token.length == token.length &&
-                !memcmp(node->token.start, token.start, token.length)) return node;
+static int same_name(Token token, Token other) {
+    return token.length && token.length == other.length && !memcmp(token.start, other.start, token.length);
+}
+
+static Node *find_alias(Parser *parser, Token token, int tag_kind, int current_scope_only) {
+    if (token.kind != TK_NAME) return NULL;
+    for (Alias *alias = parser->aliases; alias; alias = alias->next) {
+        if (current_scope_only && alias->scope != parser->scope) break;
+        if (alias->node->tag_kind == tag_kind && same_name(alias->node->token, token)) return alias->node;
+    }
+    if (current_scope_only && parser->scope) return NULL;
+    for (const Unit *unit = parser->previous; unit; unit = unit->next)
+        for (Node *entry = unit->allocations; entry; entry = entry->allocated_next)
+            if ((entry->kind == N_TYPEDEF || entry->kind == N_ENUMERATOR) && !entry->local &&
+                entry->tag_kind == tag_kind && same_name(entry->token, token)) return entry;
     return NULL;
 }
 
-static int begins_type(Parser *parser, Token token) {
-    int kind = token.kind;
-    return kind == TK_INT || kind == TK_DOUBLE || kind == TK_CHAR || kind == TK_VOID ||
-           kind == TK_CONST || kind == TK_STATIC || kind == TK_TYPEDEF || kind == TK_ENUM ||
-           (kind == TK_NAME && type_alias(parser, token, 0));
+static void declare_alias(Parser *parser, Node *entry) {
+    Alias *alias = calloc(1, sizeof *alias);
+    if (!alias) { fail(parser, "out of memory"); parser->status = CT_ERROR; return; }
+    entry->local = parser->scope != 0;
+    alias->node = entry;
+    alias->scope = parser->scope;
+    alias->next = parser->aliases;
+    parser->aliases = alias;
+    parser->unit->has_functions = 1;
 }
 
-static CtType type_name(Parser *parser, int *is_static, int *is_const) {
+static void pop_aliases(Parser *parser) {
+    while (parser->aliases && parser->aliases->scope > parser->scope) {
+        Alias *dead = parser->aliases;
+        parser->aliases = dead->next;
+        free(dead);
+    }
+}
+
+static Node *declare_tag(Parser *parser, Token tag, CtType type, int tag_kind) {
+    Node *entry = node(parser, N_TYPEDEF, tag);
+    if (!entry) return NULL;
+    entry->type = type;
+    entry->tag_kind = tag_kind;
+    declare_alias(parser, entry);
+    return entry;
+}
+
+static int begins_type(Parser *parser, Token token) {
+    switch (token.kind) {
+        case TK_INT: case TK_DOUBLE: case TK_CHAR: case TK_VOID: case TK_CONST:
+        case TK_STATIC: case TK_TYPEDEF: case TK_ENUM: case TK_STRUCT: case TK_UNION: return 1;
+        case TK_NAME: return find_alias(parser, token, TAG_NAME, 0) != NULL;
+        default: return 0;
+    }
+}
+
+static int constant_value(Parser *parser, Node *source, int *result) {
+    if (!source) return 0;
+    int left = 0, right = 0;
+    switch (source->kind) {
+        case N_VALUE:
+            if (source->token.value.type == CT_DOUBLE) return 0;
+            *result = source->token.value.as.integer;
+            return 1;
+        case N_NAME: {
+            Node *alias = find_alias(parser, source->token, TAG_CONSTANT, 0);
+            if (!alias || !alias->left || alias->left->kind != N_VALUE) return 0;
+            *result = alias->left->token.value.as.integer;
+            return 1;
+        }
+        case N_SIZEOF: case N_ALIGNOF: {
+            if (source->left) return 0;
+            size_t size = source->kind == N_SIZEOF ? ct_type_size(source->type) : ct_type_align(source->type);
+            if (!size || size > INT_MAX) return 0;
+            *result = (int)size;
+            return 1;
+        }
+        case N_CAST:
+            if (source->type != CT_INT && source->type != CT_CHAR) return 0;
+            if (!constant_value(parser, source->left, result)) return 0;
+            if (source->type == CT_CHAR) *result = (char)*result;
+            return 1;
+        case N_UNARY:
+            if (!constant_value(parser, source->left, &left)) return 0;
+            switch (source->token.kind) {
+                case '+': *result = left; return 1;
+                case '-': if (left == INT_MIN) return 0; *result = -left; return 1;
+                case '~': *result = ~left; return 1;
+                case '!': *result = !left; return 1;
+                default: return 0;
+            }
+        case N_CONDITIONAL: {
+            int condition = 0;
+            if (!constant_value(parser, source->left, &condition)) return 0;
+            return constant_value(parser, condition ? source->right : source->third, result);
+        }
+        case N_BINARY: {
+            int kind = source->token.kind;
+            if (is_assignment(kind)) return 0;
+            if (!constant_value(parser, source->left, &left)) return 0;
+            if (kind == TK_AND && !left) { *result = 0; return 1; }
+            if (kind == TK_OR && left) { *result = 1; return 1; }
+            if (!constant_value(parser, source->right, &right)) return 0;
+            int64_t value;
+            switch (kind) {
+                case '+': value = (int64_t)left + right; break;
+                case '-': value = (int64_t)left - right; break;
+                case '*': value = (int64_t)left * right; break;
+                case '/': case '%':
+                    if (!right || (left == INT_MIN && right == -1)) return 0;
+                    value = kind == '/' ? left / right : left % right;
+                    break;
+                case '&': value = left & right; break;
+                case '|': value = left | right; break;
+                case '^': value = left ^ right; break;
+                case TK_SHL: case TK_SHR:
+                    if (right < 0 || right >= (int)(sizeof(int) * CHAR_BIT) || (kind == TK_SHL && left < 0)) return 0;
+                    value = kind == TK_SHL ? (int64_t)left << right : left >> right;
+                    break;
+                case TK_EQ: value = left == right; break;
+                case TK_NE: value = left != right; break;
+                case '<': value = left < right; break;
+                case '>': value = left > right; break;
+                case TK_LE: value = left <= right; break;
+                case TK_GE: value = left >= right; break;
+                case TK_AND: value = left && right; break;
+                case TK_OR: value = left || right; break;
+                default: return 0;
+            }
+            if (value < INT_MIN || value > INT_MAX) return 0;
+            *result = (int)value;
+            return 1;
+        }
+        default: return 0;
+    }
+}
+
+static void skip_parenthesized(Parser *parser) {
+    unsigned nesting = 0;
+    do {
+        if (parser->token.kind == TK_EOF) { fail(parser, "unterminated declarator"); return; }
+        if (parser->token.kind == '(') ++nesting;
+        else if (parser->token.kind == ')') --nesting;
+        next(parser);
+    } while (parser->status == CT_OK && nesting);
+}
+
+typedef struct {
+    int function, sized, variadic;
+    size_t count, parameter_count;
+    CtType *parameters;
+    Node *nodes;
+} Suffix;
+
+static void parameter_list(Parser *parser, Suffix *suffix) {
+    suffix->function = 1;
+    if (parser->token.kind == TK_VOID) {
+        Position look = mark(parser);
+        next(parser);
+        if (accept(parser, ')')) return;
+        restore(parser, look);
+    }
+    if (accept(parser, ')')) return;
+    Node **tail = &suffix->nodes;
+    for (;;) {
+        if (accept(parser, TK_ELLIPSIS)) {
+            if (!suffix->parameter_count) { fail(parser, "'...' requires a preceding parameter"); break; }
+            suffix->variadic = 1;
+            break;
+        }
+        int is_static = 0, is_const = 0;
+        CtType base = type_specifier(parser, &is_static, &is_const, NULL);
+        Token name;
+        CtType type = type_decay(declarator(parser, base, &name, NULL, NULL));
+        if (parser->status != CT_OK) return;
+        if (!type_info(type)->complete || !ct_type_size(type)) { fail(parser, "parameter has an incomplete type"); break; }
+        CtType *grown = realloc(suffix->parameters, (suffix->parameter_count + 1) * sizeof *grown);
+        if (!grown) { fail(parser, "out of memory"); parser->status = CT_ERROR; break; }
+        suffix->parameters = grown;
+        suffix->parameters[suffix->parameter_count++] = type;
+        Node *parameter = node(parser, N_DECLARATION, name);
+        if (!parameter) break;
+        parameter->type = type;
+        *tail = parameter;
+        tail = &parameter->next;
+        if (!accept(parser, ',')) break;
+    }
+    expect(parser, ')', "expected ')' after parameters");
+}
+
+static CtType declarator(Parser *parser, CtType base, Token *name, Node **parameters, int *variadic) {
+    if (parser->status != CT_OK || !enter(parser)) return base;
+    while (accept(parser, '*')) {
+        base = type_pointer(base);
+        while (accept(parser, TK_CONST)) {}
+    }
+    if (name) { *name = parser->token; name->length = 0; }
+    Position before = mark(parser);
+    int nested = 0;
+    if (parser->token.kind == '(') {
+        Lexer lookahead = parser->lexer;
+        Token after = lexer_next(&lookahead);
+        nested = after.kind == '*' || (after.kind == TK_NAME && !begins_type(parser, after));
+    }
+    if (nested) skip_parenthesized(parser);
+    else if (parser->token.kind == TK_NAME) {
+        if (name) *name = parser->token;
+        next(parser);
+    }
+    Suffix suffixes[SUFFIX_LIMIT] = {{0}};
+    size_t count = 0;
+    while (parser->status == CT_OK && (parser->token.kind == '[' || parser->token.kind == '(')) {
+        if (count == SUFFIX_LIMIT) { fail(parser, "declarator complexity limit exceeded"); break; }
+        Suffix *suffix = &suffixes[count++];
+        if (accept(parser, '[')) {
+            if (parser->token.kind != ']') {
+                Node *size = expression(parser, 1);
+                int value = 0;
+                if (parser->status != CT_OK) break;
+                if (!constant_value(parser, size, &value) || value <= 0) {
+                    fail(parser, "array size must be a positive integer constant expression");
+                    break;
+                }
+                suffix->count = (size_t)value;
+                suffix->sized = 1;
+            }
+            expect(parser, ']', "expected ']' after array size");
+        } else {
+            next(parser);
+            parameter_list(parser, suffix);
+        }
+    }
+    for (size_t i = count; i-- > 0 && parser->status == CT_OK;) {
+        Suffix *suffix = &suffixes[i];
+        if (suffix->function) {
+            if (type_is_function(base) || type_is_array(base)) fail(parser, "a function cannot return an array or a function");
+            else base = type_function(base, suffix->parameters, suffix->parameter_count, suffix->variadic);
+            if (parameters) *parameters = suffix->nodes;
+            if (variadic) *variadic = suffix->variadic;
+        } else if (!suffix->sized && i) fail(parser, "only the first array dimension may be unsized");
+        else if (type_is_function(base)) fail(parser, "an array cannot hold functions");
+        else {
+            CtType array = type_array(base, suffix->count);
+            if (array == CT_VOID) fail(parser, "an array requires a complete element type");
+            else base = array;
+        }
+    }
+    for (size_t i = 0; i < count; ++i) free(suffixes[i].parameters);
+    if (nested && parser->status == CT_OK) {
+        Position after_suffixes = mark(parser);
+        restore(parser, before);
+        expect(parser, '(', "expected '(' in declarator");
+        base = declarator(parser, base, name, parameters, variadic);
+        expect(parser, ')', "expected ')' in declarator");
+        if (parser->status == CT_OK) restore(parser, after_suffixes);
+    }
+    --parser->depth;
+    return base;
+}
+
+static CtType type_name_of(Parser *parser) {
+    int is_static = 0, is_const = 0;
+    CtType base = type_specifier(parser, &is_static, &is_const, NULL);
+    Token name;
+    CtType type = declarator(parser, base, &name, NULL, NULL);
+    if (name.length) fail(parser, "a type name cannot declare a variable");
+    return type;
+}
+
+static void aggregate_members(Parser *parser, CtType aggregate) {
+    while (parser->status == CT_OK && parser->token.kind != '}' && parser->token.kind != TK_EOF) {
+        int is_static = 0, is_const = 0;
+        CtType base = type_specifier(parser, &is_static, &is_const, NULL);
+        if (is_static) { fail(parser, "a member cannot be static"); break; }
+        do {
+            Token name;
+            CtType type = declarator(parser, base, &name, NULL, NULL);
+            if (parser->status != CT_OK) return;
+            if (!name.length) { fail(parser, "expected a member name"); return; }
+            if (!type_add_member(aggregate, name.start, name.length, type))
+                { fail(parser, "member has a duplicate name or an incomplete type"); return; }
+        } while (accept(parser, ','));
+        expect(parser, ';', "expected ';' after the member declaration");
+    }
+    expect(parser, '}', "expected '}' after members");
+    if (parser->status == CT_OK && !type_finish(aggregate)) fail(parser, "an aggregate requires at least one member");
+}
+
+static CtType aggregate_specifier(Parser *parser) {
+    int is_union = parser->token.kind == TK_UNION;
+    int tag_kind = is_union ? TAG_UNION : TAG_STRUCT;
+    next(parser);
+    Token tag = parser->token;
+    int named = tag.kind == TK_NAME;
+    if (named) next(parser);
+    if (parser->token.kind != '{') {
+        if (!named) { fail(parser, "expected a tag or '{'"); return CT_INT; }
+        Node *existing = find_alias(parser, tag, tag_kind, 0);
+        if (existing) return existing->type;
+        CtType type = type_aggregate(is_union, tag.start, tag.length);
+        if (type == CT_VOID) { fail(parser, "type limit exceeded"); return CT_INT; }
+        Node *entry = declare_tag(parser, tag, type, tag_kind);
+        return entry ? type : CT_INT;
+    }
+    Node *existing = named ? find_alias(parser, tag, tag_kind, 1) : NULL;
+    if (existing && type_info(existing->type)->complete) { fail(parser, "the tag is already defined"); return CT_INT; }
+    CtType type = existing ? existing->type : type_aggregate(is_union, tag.start, tag.length);
+    if (type == CT_VOID) { fail(parser, "type limit exceeded"); return CT_INT; }
+    if (named && !existing && !declare_tag(parser, tag, type, tag_kind)) return CT_INT;
+    next(parser);
+    aggregate_members(parser, type);
+    return type;
+}
+
+static CtType enum_specifier(Parser *parser, Node ***tail) {
+    next(parser);
+    Token tag = parser->token;
+    int named = tag.kind == TK_NAME;
+    if (named) next(parser);
+    if (parser->token.kind != '{') {
+        if (!named) { fail(parser, "expected a tag or '{'"); return CT_INT; }
+        Node *existing = find_alias(parser, tag, TAG_ENUM, 0);
+        if (!existing) fail(parser, "unknown enum tag");
+        return CT_INT;
+    }
+    if (!tail) { fail(parser, "an enum definition is not allowed here"); return CT_INT; }
+    if (named) {
+        if (find_alias(parser, tag, TAG_ENUM, 1)) { fail(parser, "the tag is already defined"); return CT_INT; }
+        if (!declare_tag(parser, tag, CT_INT, TAG_ENUM)) return CT_INT;
+    }
+    next(parser);
+    int value = 0;
+    while (parser->status == CT_OK && parser->token.kind != '}') {
+        Token name = parser->token;
+        expect(parser, TK_NAME, "expected an enumerator name");
+        if (find_alias(parser, name, TAG_CONSTANT, 1)) { fail(parser, "the enumerator is already defined"); break; }
+        if (accept(parser, '=') && !constant_value(parser, expression(parser, 1), &value)) {
+            if (parser->status == CT_OK) fail(parser, "an enumerator requires an integer constant expression");
+            break;
+        }
+        Node *enumerator = node(parser, N_ENUMERATOR, name);
+        Node *literal = node(parser, N_VALUE, name);
+        if (!enumerator || !literal) break;
+        literal->token.kind = TK_INTEGER;
+        literal->token.value = (CtValue){.type = CT_INT, .as.integer = value};
+        enumerator->type = CT_INT;
+        enumerator->is_const = 1;
+        enumerator->tag_kind = TAG_CONSTANT;
+        enumerator->left = literal;
+        declare_alias(parser, enumerator);
+        **tail = enumerator;
+        *tail = &enumerator->next;
+        if (value == INT_MAX && parser->token.kind == ',') { fail(parser, "enumerator value overflows int"); break; }
+        ++value;
+        if (!accept(parser, ',')) break;
+    }
+    expect(parser, '}', "expected '}' after enumerators");
+    return CT_INT;
+}
+
+static CtType type_specifier(Parser *parser, int *is_static, int *is_const, Node ***tail) {
     while (parser->token.kind == TK_STATIC || parser->token.kind == TK_CONST) {
         if (parser->token.kind == TK_STATIC) *is_static = 1;
         else *is_const = 1;
@@ -118,37 +478,22 @@ static CtType type_name(Parser *parser, int *is_static, int *is_const) {
     }
     CtType type = CT_INT;
     switch (parser->token.kind) {
-        case TK_INT: type = CT_INT; break;
-        case TK_DOUBLE: type = CT_DOUBLE; break;
-        case TK_CHAR: type = CT_CHAR; break;
-        case TK_VOID: type = CT_VOID; break;
-        case TK_ENUM: {
-            next(parser);
-            Node *alias = type_alias(parser, parser->token, 1);
-            if (!alias) { fail(parser, "unknown enum tag"); return CT_INT; }
-            type = alias->type;
-            break;
-        }
+        case TK_INT: type = CT_INT; next(parser); break;
+        case TK_DOUBLE: type = CT_DOUBLE; next(parser); break;
+        case TK_CHAR: type = CT_CHAR; next(parser); break;
+        case TK_VOID: type = CT_VOID; next(parser); break;
+        case TK_STRUCT: case TK_UNION: type = aggregate_specifier(parser); break;
+        case TK_ENUM: type = enum_specifier(parser, tail); break;
         case TK_NAME: {
-            Node *alias = type_alias(parser, parser->token, 0);
+            Node *alias = find_alias(parser, parser->token, TAG_NAME, 0);
             if (!alias) { fail(parser, "unknown type name"); return CT_INT; }
             type = alias->type;
+            next(parser);
             break;
         }
         default: fail(parser, "expected a type"); return CT_INT;
     }
-    next(parser);
     while (accept(parser, TK_CONST)) *is_const = 1;
-    return type;
-}
-
-static CtType pointer_type(Parser *parser, CtType type) {
-    unsigned depth = 0;
-    while (accept(parser, '*')) {
-        if (++depth > 16) { fail(parser, "pointer nesting limit exceeded"); break; }
-        type = (CtType)(type + CT_POINTER);
-        while (accept(parser, TK_CONST)) {}
-    }
     return type;
 }
 
@@ -159,7 +504,7 @@ static Node *primary(Parser *parser) {
         if (!result) return NULL;
         expect(parser, '(', "expected '(' after _Generic");
         result->left = expression(parser, 1);
-        expect(parser, ',', "expected ',' after controlling expression");
+        expect(parser, ',', "expected ',' after the controlling expression");
         Node **tail = &result->right;
         do {
             Node *association = node(parser, N_ASSOCIATION, parser->token);
@@ -167,23 +512,22 @@ static Node *primary(Parser *parser) {
             *tail = association;
             tail = &association->next;
             if (accept(parser, TK_DEFAULT)) association->is_const = 1;
-            else {
-                int is_static = 0, is_const = 0;
-                CtType type = type_name(parser, &is_static, &is_const);
-                association->type = pointer_type(parser, type);
-            }
-            expect(parser, ':', "expected ':' in generic association");
+            else association->type = type_name_of(parser);
+            expect(parser, ':', "expected ':' in a generic association");
             association->left = expression(parser, 1);
         } while (accept(parser, ','));
-        expect(parser, ')', "expected ')' after generic associations");
+        expect(parser, ')', "expected ')' after the generic associations");
         return result;
     }
     if (accept(parser, '(')) {
         if (begins_type(parser, parser->token)) {
-            int is_static = 0, is_const = 0;
-            CtType type = type_name(parser, &is_static, &is_const);
-            type = pointer_type(parser, type);
-            expect(parser, ')', "expected ')' after type");
+            CtType type = type_name_of(parser);
+            expect(parser, ')', "expected ')' after the type");
+            if (parser->token.kind == '{') {
+                Node *result = node(parser, N_COMPOUND, token);
+                if (result) { result->type = type; result->left = initializer(parser); }
+                return result;
+            }
             Node *result = node(parser, N_CAST, token);
             if (result) { result->type = type; result->left = expression(parser, 13); }
             return result;
@@ -196,14 +540,18 @@ static Node *primary(Parser *parser) {
         next(parser);
         Node *result = node(parser, token.kind == TK_SIZEOF ? N_SIZEOF : N_ALIGNOF, token);
         if (!result) return NULL;
-        if (accept(parser, '(')) {
+        if (parser->token.kind == '(') {
+            Position open = mark(parser);
+            next(parser);
             if (begins_type(parser, parser->token)) {
-                int is_static = 0, is_const = 0;
-                CtType type = type_name(parser, &is_static, &is_const);
-                result->type = pointer_type(parser, type);
-            } else result->left = expression(parser, 1);
-            expect(parser, ')', "expected ')' after sizeof operand");
-        } else result->left = expression(parser, 13);
+                result->type = type_name_of(parser);
+                expect(parser, ')', "expected ')' after the sizeof operand");
+                return result;
+            }
+            restore(parser, open);
+        }
+        if (token.kind == TK_ALIGNOF) fail(parser, "_Alignof requires a parenthesized type");
+        result->left = expression(parser, 13);
         return result;
     }
     if (token.kind == TK_STRING) {
@@ -235,11 +583,43 @@ static Node *primary(Parser *parser) {
         next(parser);
         return node(parser, N_VALUE, token);
     }
-    if (accept(parser, TK_NAME)) {
-        Node *result = node(parser, N_NAME, token);
-        if (result && accept(parser, '(')) {
-            result->kind = N_CALL;
-            Node **tail = &result->left;
+    if (accept(parser, TK_NAME)) return node(parser, N_NAME, token);
+    fail(parser, "expected an expression");
+    return NULL;
+}
+
+static Node *postfix(Parser *parser) {
+    Node *left = primary(parser);
+    while (parser->status == CT_OK && left) {
+        int kind = parser->token.kind;
+        if (kind == TK_INCREMENT || kind == TK_DECREMENT) {
+            Node *result = node(parser, N_POSTFIX, parser->token);
+            next(parser);
+            if (!result) break;
+            result->left = left;
+            left = result;
+        } else if (kind == '[') {
+            Node *index = node(parser, N_INDEX, parser->token);
+            next(parser);
+            if (!index) break;
+            index->left = left;
+            index->right = expression(parser, 1);
+            expect(parser, ']', "expected ']' after a subscript");
+            left = index;
+        } else if (kind == '.' || kind == TK_ARROW) {
+            next(parser);
+            Node *member = node(parser, N_MEMBER, parser->token);
+            if (!member) break;
+            member->through_pointer = kind == TK_ARROW;
+            member->left = left;
+            expect(parser, TK_NAME, "expected a member name");
+            left = member;
+        } else if (kind == '(') {
+            Node *result = node(parser, N_CALL, left->token);
+            next(parser);
+            if (!result) break;
+            result->left = left;
+            Node **tail = &result->right;
             if (parser->token.kind != ')') {
                 do {
                     *tail = expression(parser, 1);
@@ -247,31 +627,16 @@ static Node *primary(Parser *parser) {
                     tail = &(*tail)->next;
                 } while (accept(parser, ','));
             }
-            expect(parser, ')', "expected ')' after arguments");
-        }
-        return result;
+            expect(parser, ')', "expected ')' after the arguments");
+            left = result;
+        } else break;
     }
-    fail(parser, "expected an expression");
-    return NULL;
+    return left;
 }
 
 static Node *expression(Parser *parser, int minimum) {
     if (parser->status != CT_OK || !enter(parser)) return NULL;
-    Node *left = primary(parser);
-    while (parser->status == CT_OK) {
-        if (parser->token.kind == TK_INCREMENT || parser->token.kind == TK_DECREMENT) {
-            Node *postfix = node(parser, N_POSTFIX, parser->token);
-            next(parser);
-            if (postfix) { postfix->left = left; left = postfix; }
-        } else if (accept(parser, '[')) {
-            Node *index = node(parser, N_INDEX, left->token);
-            if (!index) break;
-            index->left = left;
-            index->right = expression(parser, 1);
-            expect(parser, ']', "expected ']' after subscript");
-            left = index;
-        } else break;
-    }
+    Node *left = postfix(parser);
     while (parser->status == CT_OK && precedence(parser->token.kind) >= minimum) {
         Token operator = parser->token;
         int level = precedence(operator.kind);
@@ -281,12 +646,13 @@ static Node *expression(Parser *parser, int minimum) {
         result->left = left;
         if (operator.kind == '?') {
             result->right = expression(parser, 1);
-            expect(parser, ':', "expected ':' in conditional expression");
+            expect(parser, ':', "expected ':' in a conditional expression");
             result->third = expression(parser, 2);
         } else {
-            if (is_assignment(operator.kind) && left && left->kind != N_NAME && left->kind != N_INDEX && left->kind != N_GENERIC &&
+            if (is_assignment(operator.kind) && left && left->kind != N_NAME && left->kind != N_INDEX &&
+                left->kind != N_MEMBER && left->kind != N_GENERIC &&
                 !(left->kind == N_UNARY && left->token.kind == '*')) {
-                fail(parser, "assignment requires a variable on the left");
+                fail(parser, "assignment requires an assignable expression on the left");
                 parser->status = CT_ERROR;
             }
             result->right = expression(parser, is_assignment(operator.kind) ? level : level + 1);
@@ -297,156 +663,150 @@ static Node *expression(Parser *parser, int minimum) {
     return left;
 }
 
+static Node *designated_item(Parser *parser) {
+    Node *result = node(parser, N_DESIGNATED, parser->token);
+    if (!result) return NULL;
+    Node **chain = &result->left;
+    while (parser->status == CT_OK && (parser->token.kind == '.' || parser->token.kind == '[')) {
+        int field = parser->token.kind == '.';
+        Node *designator = node(parser, N_DESIGNATOR, parser->token);
+        next(parser);
+        if (!designator) return result;
+        designator->tag_kind = field;
+        if (field) {
+            designator->token = parser->token;
+            expect(parser, TK_NAME, "expected a member name after '.'");
+        } else {
+            designator->left = expression(parser, 1);
+            expect(parser, ']', "expected ']' after an array designator");
+        }
+        *chain = designator;
+        chain = &designator->next;
+    }
+    expect(parser, '=', "expected '=' after a designator");
+    result->right = initializer(parser);
+    return result;
+}
+
 static Node *initializer(Parser *parser) {
-    if (!accept(parser, '{')) return expression(parser, 1);
+    if (parser->token.kind != '{') return expression(parser, 1);
     Node *result = node(parser, N_INITIALIZER, parser->token);
+    next(parser);
     if (!result) return NULL;
     Node **tail = &result->left;
     while (parser->status == CT_OK && parser->token.kind != '}') {
-        *tail = expression(parser, 1);
-        if (!*tail) break;
-        tail = &(*tail)->next;
+        Node *item = parser->token.kind == '.' || parser->token.kind == '[' ? designated_item(parser) : initializer(parser);
+        if (!item) break;
+        *tail = item;
+        tail = &item->next;
         if (!accept(parser, ',')) break;
     }
-    expect(parser, '}', "expected '}' after initializer");
+    expect(parser, '}', "expected '}' after an initializer");
     return result;
+}
+
+static size_t initializer_extent(Parser *parser, Node *list) {
+    size_t extent = 0, index = 0;
+    for (Node *item = list->left; item; item = item->next, ++index) {
+        if (item->kind == N_DESIGNATED) {
+            Node *designator = item->left;
+            int value = 0;
+            if (!designator || designator->tag_kind || !constant_value(parser, designator->left, &value) || value < 0) {
+                fail(parser, "an array designator requires a non-negative integer constant expression");
+                return 0;
+            }
+            index = (size_t)value;
+        }
+        if (index + 1 > extent) extent = index + 1;
+    }
+    return extent;
 }
 
 static Node *declaration(Parser *parser, int top_level) {
     int is_typedef = accept(parser, TK_TYPEDEF);
-    if (is_typedef && !top_level) { fail(parser, "local typedefs are not implemented"); return NULL; }
     int is_static = 0, is_const = 0;
-    CtType base = type_name(parser, &is_static, &is_const);
     Node *group = node(parser, N_GROUP, parser->token);
     if (!group) return NULL;
     Node **tail = &group->left;
+    CtType base = type_specifier(parser, &is_static, &is_const, &tail);
+    if (parser->status != CT_OK) return group;
+    if (!is_typedef && accept(parser, ';')) return group;
     do {
-        CtType type = pointer_type(parser, base);
-        Token name = parser->token;
-        expect(parser, TK_NAME, "expected a name after the type");
-        Node *result = node(parser, is_typedef ? N_TYPEDEF : N_DECLARATION, name);
+        Token name;
+        Node *parameters = NULL;
+        int variadic = 0;
+        CtType type = declarator(parser, base, &name, &parameters, &variadic);
+        if (parser->status != CT_OK) return group;
+        if (!name.length) { fail(parser, "expected a name after the type"); return group; }
+        if (is_typedef) {
+            Node *alias = node(parser, N_TYPEDEF, name);
+            if (!alias) return group;
+            alias->type = type;
+            alias->tag_kind = TAG_NAME;
+            declare_alias(parser, alias);
+            *tail = alias;
+            tail = &alias->next;
+            continue;
+        }
+        if (type_is_function(type)) {
+            if (!top_level) { fail(parser, "function declarations require the top level"); return group; }
+            Node *function = node(parser, N_FUNCTION, name);
+            if (!function) return group;
+            function->type = type;
+            function->left = parameters;
+            function->variadic = variadic;
+            *tail = function;
+            tail = &function->next;
+            parser->unit->has_functions = 1;
+            if (parser->token.kind == '{') {
+                ++parser->functions;
+                CtType enclosing = parser->function_type;
+                parser->function_type = type_target(type);
+                ++parser->scope;
+                function->right = statement(parser, 0);
+                --parser->scope;
+                pop_aliases(parser);
+                parser->function_type = enclosing;
+                --parser->functions;
+                return group;
+            }
+            continue;
+        }
+        Node *result = node(parser, N_DECLARATION, name);
         if (!result) return group;
         result->type = type;
         result->is_static = is_static;
-        result->is_const = is_const && type < CT_POINTER;
+        result->is_const = is_const && !type_is_pointer(type);
         *tail = result;
         tail = &result->next;
-        if (accept(parser, '(')) {
-            if (is_typedef) { fail(parser, "function typedefs are not implemented"); return group; }
-            if (!top_level) { fail(parser, "function declarations require top level"); return group; }
-            result->kind = N_FUNCTION;
-            parser->unit->has_functions = 1;
-            Node **parameter = &result->left;
-            if (parser->token.kind == TK_VOID) {
-                Lexer lookahead = parser->lexer;
-                if (lexer_next(&lookahead).kind == ')') next(parser);
+        if (accept(parser, '=')) {
+            result->left = initializer(parser);
+            if (parser->status != CT_OK) return group;
+            if (type_is_array(type) && !type_info(type)->count) {
+                size_t extent = 0;
+                if (result->left->kind == N_STRING) extent = result->left->text_length + 1;
+                else if (result->left->kind == N_INITIALIZER) extent = initializer_extent(parser, result->left);
+                if (!extent) { fail(parser, "an unsized array requires a brace or string initializer"); return group; }
+                result->type = type_array(type_target(type), extent);
             }
-            while (parser->status == CT_OK && parser->token.kind != ')') {
-                int parameter_static = 0, parameter_const = 0;
-                CtType parameter_type = type_name(parser, &parameter_static, &parameter_const);
-                parameter_type = pointer_type(parser, parameter_type);
-                if (parameter_type == CT_VOID) { fail(parser, "parameter cannot have void type"); break; }
-                Token parameter_name = parser->token;
-                if (parser->token.kind == TK_NAME) next(parser);
-                else parameter_name.length = 0;
-                *parameter = node(parser, N_DECLARATION, parameter_name);
-                if (!*parameter) break;
-                (*parameter)->type = parameter_type;
-                if (accept(parser, '[')) {
-                    expect(parser, ']', "only unsized parameter arrays are supported");
-                    (*parameter)->type = (CtType)(parameter_type + CT_POINTER);
-                }
-                parameter = &(*parameter)->next;
-                if (!accept(parser, ',')) break;
-            }
-            expect(parser, ')', "expected ')' after parameters");
-            if (accept(parser, ';')) return group;
-            if (parser->token.kind != '{') fail(parser, "expected function body or ';'");
-            ++parser->functions;
-            parser->function_type = result->type;
-            result->right = statement(parser, 0);
-            --parser->functions;
+        }
+        if (!type_info(result->type)->complete || !ct_type_size(result->type)) {
+            fail(parser, "a variable requires a complete object type");
             return group;
         }
-        if (is_typedef) {
-            parser->unit->has_functions = 1;
-            if (parser->token.kind != ',' && parser->token.kind != ';') fail(parser, "typedef requires a scalar or pointer type");
-            continue;
-        }
-        if (type == CT_VOID) { fail(parser, "variable cannot have void type"); return group; }
-        if (accept(parser, '[')) {
-            result->is_array = 1;
-            if (parser->token.kind != ']') result->right = expression(parser, 1);
-            expect(parser, ']', "expected ']' after array size");
-        }
-        if (accept(parser, '=')) result->left = initializer(parser);
     } while (accept(parser, ','));
-    expect(parser, ';', "expected ';' after declaration");
-    return group;
-}
-
-static Node *enum_definition(Parser *parser, int top_level) {
-    if (!top_level) { fail(parser, "local enum definitions are not implemented"); return NULL; }
-    Token token = parser->token;
-    next(parser);
-    Node *group = node(parser, N_GROUP, token);
-    if (!group) return NULL;
-    Node **tail = &group->left;
-    if (parser->token.kind == TK_NAME) {
-        if (type_alias(parser, parser->token, 1)) { fail(parser, "enum tag is already defined"); return group; }
-        *tail = node(parser, N_TYPEDEF, parser->token);
-        if (!*tail) return group;
-        (*tail)->enum_tag = 1;
-        (*tail)->type = CT_INT;
-        tail = &(*tail)->next;
-        parser->unit->has_functions = 1;
-        next(parser);
-    }
-    expect(parser, '{', "expected '{' after enum tag");
-    Token previous = {0};
-    while (parser->status == CT_OK && parser->token.kind != '}') {
-        Token name = parser->token;
-        expect(parser, TK_NAME, "expected enumerator name");
-        *tail = node(parser, N_ENUMERATOR, name);
-        if (!*tail) break;
-        Node *enumerator = *tail;
-        enumerator->type = CT_INT;
-        enumerator->is_const = 1;
-        if (accept(parser, '=')) enumerator->left = expression(parser, 1);
-        else if (!previous.length) {
-            enumerator->left = node(parser, N_VALUE, name);
-            if (enumerator->left) enumerator->left->token.value = (CtValue){.type = CT_INT};
-        } else {
-            Token plus = name;
-            plus.kind = '+';
-            enumerator->left = node(parser, N_BINARY, plus);
-            if (enumerator->left) {
-                enumerator->left->left = node(parser, N_NAME, previous);
-                enumerator->left->right = node(parser, N_VALUE, name);
-                if (enumerator->left->right) enumerator->left->right->token.value = (CtValue){.type = CT_INT, .as.integer = 1};
-            }
-        }
-        previous = name;
-        tail = &enumerator->next;
-        if (!accept(parser, ',')) break;
-    }
-    expect(parser, '}', "expected '}' after enumerators");
-    expect(parser, ';', "expected ';' after enum definition");
+    expect(parser, ';', "expected ';' after the declaration");
     return group;
 }
 
 static Node *statement_inner(Parser *parser, int top_level) {
     Token token = parser->token;
-    if (token.kind == TK_ENUM) {
-        Lexer lookahead = parser->lexer;
-        Token next_token = lexer_next(&lookahead);
-        if (next_token.kind == TK_NAME) next_token = lexer_next(&lookahead);
-        if (next_token.kind == '{') return enum_definition(parser, top_level);
-    }
     if (begins_type(parser, token)) return declaration(parser, top_level);
-    if (accept(parser, '{')) {
+    if (token.kind == '{') {
+        next(parser);
         Node *result = node(parser, N_BLOCK, token);
         if (!result) return NULL;
+        ++parser->scope;
         Node **tail = &result->left;
         while (parser->status == CT_OK && parser->token.kind != '}' && parser->token.kind != TK_EOF) {
             *tail = statement(parser, 0);
@@ -454,6 +814,8 @@ static Node *statement_inner(Parser *parser, int top_level) {
             tail = &(*tail)->next;
         }
         expect(parser, '}', "expected '}'");
+        --parser->scope;
+        pop_aliases(parser);
         return result;
     }
     if (accept(parser, TK_IF)) {
@@ -461,7 +823,7 @@ static Node *statement_inner(Parser *parser, int top_level) {
         if (!result) return NULL;
         expect(parser, '(', "expected '(' after if");
         result->left = expression(parser, 1);
-        expect(parser, ')', "expected ')' after condition");
+        expect(parser, ')', "expected ')' after the condition");
         result->right = statement(parser, 0);
         if (accept(parser, TK_ELSE)) result->third = statement(parser, 0);
         return result;
@@ -472,10 +834,10 @@ static Node *statement_inner(Parser *parser, int top_level) {
         ++parser->loops;
         result->right = statement(parser, 0);
         --parser->loops;
-        expect(parser, TK_WHILE, "expected while after do body");
+        expect(parser, TK_WHILE, "expected while after the do body");
         expect(parser, '(', "expected '(' after while");
         result->left = expression(parser, 1);
-        expect(parser, ')', "expected ')' after condition");
+        expect(parser, ')', "expected ')' after the condition");
         expect(parser, ';', "expected ';' after do-while");
         return result;
     }
@@ -484,7 +846,7 @@ static Node *statement_inner(Parser *parser, int top_level) {
         if (!result) return NULL;
         expect(parser, '(', "expected '(' after switch");
         result->left = expression(parser, 1);
-        expect(parser, ')', "expected ')' after switch expression");
+        expect(parser, ')', "expected ')' after the switch expression");
         if (parser->token.kind != '{') fail(parser, "switch requires a block");
         ++parser->switches;
         result->right = statement(parser, 0);
@@ -504,7 +866,8 @@ static Node *statement_inner(Parser *parser, int top_level) {
         next(parser);
         Node *result = node(parser, token.kind == TK_WHILE ? N_WHILE : N_FOR, token);
         if (!result) return NULL;
-        expect(parser, '(', "expected '(' after loop keyword");
+        expect(parser, '(', "expected '(' after the loop keyword");
+        ++parser->scope;
         if (token.kind == TK_FOR) {
             if (begins_type(parser, parser->token))
                 result->left = declaration(parser, 0);
@@ -513,17 +876,19 @@ static Node *statement_inner(Parser *parser, int top_level) {
                     result->left = node(parser, N_EXPRESSION, parser->token);
                     if (result->left) result->left->left = expression(parser, 1);
                 }
-                expect(parser, ';', "expected ';' after for initializer");
+                expect(parser, ';', "expected ';' after the for initializer");
             }
             if (parser->token.kind != ';') result->right = expression(parser, 1);
-            expect(parser, ';', "expected ';' after for condition");
+            expect(parser, ';', "expected ';' after the for condition");
             if (parser->token.kind != ')') result->third = expression(parser, 1);
         } else result->left = expression(parser, 1);
-        expect(parser, ')', "expected ')' after loop header");
+        expect(parser, ')', "expected ')' after the loop header");
         ++parser->loops;
         if (token.kind == TK_FOR) result->fourth = statement(parser, 0);
         else result->right = statement(parser, 0);
         --parser->loops;
+        --parser->scope;
+        pop_aliases(parser);
         return result;
     }
     if (accept(parser, TK_GOTO)) {
@@ -554,11 +919,11 @@ static Node *statement_inner(Parser *parser, int top_level) {
         Node *result = node(parser, kind, token);
         if (!result) return NULL;
         if (kind == N_RETURN) {
-            if (parser->function_type == CT_VOID && parser->token.kind != ';') fail(parser, "void function cannot return a value");
-            if (parser->function_type != CT_VOID && parser->token.kind == ';') fail(parser, "non-void function must return a value");
+            if (parser->function_type == CT_VOID && parser->token.kind != ';') fail(parser, "a void function cannot return a value");
+            if (parser->function_type != CT_VOID && parser->token.kind == ';') fail(parser, "a non-void function must return a value");
             if (parser->token.kind != ';') result->left = expression(parser, 1);
         }
-        expect(parser, ';', "expected ';' after statement");
+        expect(parser, ';', "expected ';' after the statement");
         return result;
     }
     if (accept(parser, ';')) return node(parser, N_EMPTY, token);
@@ -567,7 +932,7 @@ static Node *statement_inner(Parser *parser, int top_level) {
     result->left = expression(parser, 1);
     result->terminated = parser->token.kind == ';';
     if (!(top_level && parser->token.kind == TK_EOF))
-        expect(parser, ';', "expected ';' after expression");
+        expect(parser, ';', "expected ';' after the expression");
     return result;
 }
 
@@ -615,6 +980,13 @@ CtStatus parse_with_context(const char *source, const Unit *previous, Unit **uni
         if (!*tail) break;
         tail = &(*tail)->next;
     }
+    parser.scope = 0;
+    pop_aliases(&parser);
+    while (parser.aliases) {
+        Alias *dead = parser.aliases;
+        parser.aliases = dead->next;
+        free(dead);
+    }
     if (parser.status != CT_OK) unit_destroy(result);
     else *unit = result;
     return parser.status;
@@ -629,11 +1001,18 @@ static void dump_node(FILE *output, const Node *node, unsigned depth) {
         "value", "name", "unary", "postfix", "binary", "conditional", "call",
         "declaration", "expression", "block", "if", "while", "for", "return", "break",
         "continue", "function", "empty", "string", "index", "cast", "sizeof", "alignof",
-        "declarations", "initializer", "do", "switch", "case", "goto", "label", "typedef", "enumerator", "generic", "association"
+        "declarations", "initializer", "do", "switch", "case", "goto", "label", "typedef",
+        "enumerator", "generic", "association", "member", "compound", "designated", "designator"
     };
     for (; node; node = node->next) {
         fprintf(output, "%*s%s", (int)(depth * 2), "", names[node->kind]);
         if (node->token.length) fprintf(output, " %.*s", (int)node->token.length, node->token.start);
+        if (node->kind == N_DECLARATION || node->kind == N_FUNCTION || node->kind == N_TYPEDEF ||
+            node->kind == N_CAST || node->kind == N_COMPOUND) {
+            char name[128];
+            ct_type_name(node->type, name, sizeof name);
+            fprintf(output, " : %s", name);
+        }
         fprintf(output, " [%zu:%zu]\n", node->token.line, node->token.column);
         if (node->left) dump_node(output, node->left, depth + 1);
         if (node->right) dump_node(output, node->right, depth + 1);

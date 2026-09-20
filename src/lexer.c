@@ -85,7 +85,8 @@ Token lexer_next(Lexer *lexer) {
             {"continue", TK_CONTINUE}, {"char", TK_CHAR}, {"do", TK_DO},
             {"sizeof", TK_SIZEOF}, {"_Alignof", TK_ALIGNOF}, {"static", TK_STATIC},
             {"const", TK_CONST}, {"switch", TK_SWITCH}, {"case", TK_CASE},
-            {"default", TK_DEFAULT}, {"goto", TK_GOTO}, {"typedef", TK_TYPEDEF}, {"enum", TK_ENUM}, {"_Generic", TK_GENERIC}
+            {"default", TK_DEFAULT}, {"goto", TK_GOTO}, {"typedef", TK_TYPEDEF}, {"enum", TK_ENUM},
+            {"_Generic", TK_GENERIC}, {"struct", TK_STRUCT}, {"union", TK_UNION}
         };
         for (size_t i = 0; i < sizeof keywords / sizeof keywords[0]; ++i)
             if (strlen(keywords[i].name) == token.length &&
@@ -124,8 +125,8 @@ Token lexer_next(Lexer *lexer) {
         return token;
     }
     static const struct { const char *text; int kind; } operators[] = {
-        {"<<=", TK_SHL_ASSIGN}, {">>=", TK_SHR_ASSIGN},
-        {"++", TK_INCREMENT}, {"--", TK_DECREMENT},
+        {"<<=", TK_SHL_ASSIGN}, {">>=", TK_SHR_ASSIGN}, {"...", TK_ELLIPSIS},
+        {"++", TK_INCREMENT}, {"--", TK_DECREMENT}, {"->", TK_ARROW},
         {"==", TK_EQ}, {"!=", TK_NE}, {"<=", TK_LE}, {">=", TK_GE},
         {"&&", TK_AND}, {"||", TK_OR}, {"<<", TK_SHL}, {">>", TK_SHR},
         {"+=", TK_ADD_ASSIGN}, {"-=", TK_SUB_ASSIGN}, {"*=", TK_MUL_ASSIGN},
@@ -144,7 +145,7 @@ Token lexer_next(Lexer *lexer) {
     advance(lexer);
     token.length = 1;
     token.kind = first;
-    if (!strchr("+-*/%~!&|^<>=(){}[]?:;,", first))
+    if (!strchr("+-*/%~!&|^<>=(){}[]?:;,.", first))
         return bad(lexer, token, "unsupported character or language feature");
     return token;
 }
