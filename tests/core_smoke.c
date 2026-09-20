@@ -56,6 +56,24 @@ int main(void) {
     if (!fgets(text, sizeof text, output) || strcmp(text, "ok 0007 2.50\n")) return EXIT_FAILURE;
     ct_set_streams(a, NULL, NULL, NULL);
     fclose(output);
+    check(a, "struct Point { int x, y; }; struct Point corner = {3, 4}; corner.x + corner.y", CT_OK, 7);
+    check(a, "struct Point *at = &corner; at->y = 9; corner.y", CT_OK, 9);
+    check(a, "struct Point moved = corner; moved.x = 0; corner.x + moved.x", CT_OK, 3);
+    check(a, "struct Point shift(struct Point s) { s.x += 1; return s; } shift(corner).x", CT_OK, 4);
+    check(a, "union Word { int number; char bytes[4]; } w; w.number = 0; w.bytes[0] = 1; w.number", CT_OK, 1);
+    check(a, "int grid[2][3] = {{1,2,3},{4,5,6}}; grid[1][2] + (int)sizeof(grid[0])", CT_OK, 6 + 3 * (int)sizeof(int));
+    check(a, "int twice(int n) { return n * 2; } int (*call)(int) = twice; call(21)", CT_OK, 42);
+    check(a, "int sparse[5] = { [4] = 7, [0] = 1 }; sparse[0] + sparse[4]", CT_OK, 8);
+    check(a, "struct Point named = { .y = 5 }; named.x + named.y", CT_OK, 5);
+    check(a, "(struct Point){6, 7}.y", CT_OK, 7);
+    check(a, "void scoped(void) { typedef int Local; Local value = 3; } (int)sizeof(struct Point)", CT_OK, 2 * (int)sizeof(int));
+    check(a, "corner.missing", CT_ERROR, 0);
+    check(a, "struct Point unassignable; int bad = unassignable;", CT_ERROR, 0);
+    check(a, "#include <stdbool.h>\nbool flag = true; flag && __STDC__", CT_OK, 1);
+    check(a, "#include <stddef.h>\n(int)offsetof(struct Point, y)", CT_OK, (int)sizeof(int));
+    check(a, "int order(const void *l, const void *r) { return *(const int *)l - *(const int *)r; }"
+             "int list[4] = {4,2,3,1}; qsort(list, 4, sizeof(int), order); list[0] * 1000 + list[3]", CT_OK, 1004);
+    check(a, "#include <errno.h>\nerrno = EDOM; errno == EDOM", CT_OK, 1);
     ct_clear(a);
     check(a, "x", CT_ERROR, 0);
     ct_destroy(a);
