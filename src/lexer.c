@@ -18,6 +18,12 @@ static void advance(Lexer *lexer) {
     ++lexer->cursor;
 }
 
+/* Width suffixes are accepted and ignored: every integer is an int here. */
+static int suffix_ends(const char *cursor, const char *end, const char *allowed) {
+    for (; cursor != end; ++cursor) if (!strchr(allowed, *cursor)) return 0;
+    return 1;
+}
+
 static Token bad(Lexer *lexer, Token token, const char *message) {
     token.kind = TK_ERROR;
     lexer->error.line = token.line;
@@ -109,15 +115,15 @@ Token lexer_next(Lexer *lexer) {
         errno = 0;
         if (real) {
             double value = strtod(token.start, &end);
-            if (end != lexer->cursor || (hex && !memchr(token.start, 'p', token.length) &&
-                                        !memchr(token.start, 'P', token.length)))
+            if (!suffix_ends(end, lexer->cursor, "flFL") ||
+                (hex && !memchr(token.start, 'p', token.length) && !memchr(token.start, 'P', token.length)))
                 return bad(lexer, token, "invalid or unsupported floating-point literal");
             if (errno == ERANGE || !isfinite(value)) return bad(lexer, token, "floating-point literal out of range");
             token.kind = TK_REAL;
             token.value = (CtValue){.type = CT_DOUBLE, .as.real = value};
         } else {
             long value = strtol(token.start, &end, 0);
-            if (end != lexer->cursor) return bad(lexer, token, "invalid or unsupported integer literal");
+            if (!suffix_ends(end, lexer->cursor, "uUlL")) return bad(lexer, token, "invalid or unsupported integer literal");
             if (errno == ERANGE || value > INT_MAX) return bad(lexer, token, "integer literal exceeds supported int range");
             token.kind = TK_INTEGER;
             token.value = (CtValue){.type = CT_INT, .as.integer = (int)value};

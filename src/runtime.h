@@ -50,7 +50,8 @@ struct CtInterpreter {
     FILE *input, *output, *errors;
     unsigned depth, depth_limit;
     size_t steps, step_limit;
-    int failed, exit_requested, exit_status, error_number, strict;
+    int failed, exit_requested, exit_status, strict;
+    uint64_t error_number, token_state;
     unsigned random_state;
     HostFile *files;
     FunctionRef *functions;
@@ -58,8 +59,11 @@ struct CtInterpreter {
 
 CtValue runtime_error(CtInterpreter *interpreter, Token token, const char *message);
 CtValue runtime_convert(CtInterpreter *interpreter, Token token, CtValue value, CtType type);
+CtValue runtime_invoke(CtInterpreter *interpreter, Token name, CtValue pointer, const CtValue *values, size_t count);
 int builtin_type(Token name, CtType *type);
 int builtin_value(CtInterpreter *interpreter, Token name, CtValue *value);
+/* errno is a real object so that a program may assign to it. */
+int builtin_object(CtInterpreter *interpreter, Token name, uint64_t *address, CtType *type);
 void builtin_cleanup(CtInterpreter *interpreter);
 CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args, size_t count);
 

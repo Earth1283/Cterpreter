@@ -72,6 +72,8 @@ void ct_clear(CtInterpreter *interpreter) {
     memory_destroy(&interpreter->memory);
     preprocessor_destroy(&interpreter->preprocessor);
     interpreter->scope = &interpreter->globals;
+    interpreter->error_number = 0;
+    interpreter->token_state = 0;
 }
 
 void ct_destroy(CtInterpreter *interpreter) {
@@ -168,7 +170,8 @@ static Node *function_at(CtInterpreter *interpreter, uint64_t address) {
     return NULL;
 }
 
-CtValue runtime_convert(CtInterpreter *interpreter, Token token, CtValue value, CtType type) {
+/* An explicit cast may move between pointers and integers; an implicit conversion may not. */
+static CtValue convert(CtInterpreter *interpreter, Token token, CtValue value, CtType type, int explicit_cast) {
     if (type == CT_VOID) return (CtValue){.type = CT_VOID};
     if (value.type == CT_VOID) return runtime_error(interpreter, token, "void value used in an expression");
     if (type_is_aggregate(type) || type_is_aggregate(value.type)) {
@@ -177,10 +180,16 @@ CtValue runtime_convert(CtInterpreter *interpreter, Token token, CtValue value, 
     }
     if (type_is_pointer(type)) {
         if (type_is_pointer(value.type)) return (CtValue){.type = type, .as.address = value.as.address};
-        if (type_is_integer(value.type) && !value.as.integer) return (CtValue){.type = type};
+        if (type_is_integer(value.type) && (explicit_cast || !value.as.integer))
+            return (CtValue){.type = type, .as.address = (uint64_t)(uint32_t)value.as.integer};
         return runtime_error(interpreter, token, "pointer conversion requires a pointer or zero");
     }
-    if (type_is_pointer(value.type)) return runtime_error(interpreter, token, "cannot convert a pointer to a number");
+    if (type_is_pointer(value.type)) {
+        if (!explicit_cast || type == CT_DOUBLE)
+            return runtime_error(interpreter, token, "cannot convert a pointer to a number");
+        if (value.as.address > INT_MAX) return runtime_error(interpreter, token, "address does not fit in an int");
+        value = integer((int)value.as.address);
+    }
     if (type == CT_DOUBLE) return real(as_real(value));
     double truncated = trunc(as_real(value));
     if (!isfinite(truncated) || truncated < INT_MIN || truncated > INT_MAX)
@@ -188,6 +197,10 @@ CtValue runtime_convert(CtInterpreter *interpreter, Token token, CtValue value, 
     CtValue result = integer((int)truncated);
     if (type == CT_CHAR) result = (CtValue){.type = CT_CHAR, .as.integer = (char)result.as.integer};
     return result;
+}
+
+CtValue runtime_convert(CtInterpreter *interpreter, Token token, CtValue value, CtType type) {
+    return convert(interpreter, token, value, type, 0);
 }
 
 static int base_operator(int kind) {
@@ -599,7 +612,12 @@ static Lvalue lvalue(CtInterpreter *interpreter, Node *node) {
         }
         case N_NAME: {
             Symbol *symbol = lookup(interpreter->scope, node->token, 0);
-            if (!symbol) { (void)runtime_error(interpreter, node->token, "unknown variable"); return result; }
+            if (!symbol) {
+                Lvalue builtin = {0};
+                if (builtin_object(interpreter, node->token, &builtin.address, &builtin.type)) return builtin;
+                (void)runtime_error(interpreter, node->token, "unknown variable");
+                return result;
+            }
             if (symbol->function) return (Lvalue){symbol->address, symbol->value.type, 1};
             return (Lvalue){symbol->address, symbol->value.type, symbol->is_const};
         }
@@ -649,46 +667,17 @@ static Lvalue lvalue(CtInterpreter *interpreter, Node *node) {
     }
 }
 
-static CtValue call(CtInterpreter *interpreter, Node *node) {
-    Node *callee = node->left;
-    Node *function = NULL;
-    Token name = callee && callee->kind == N_NAME ? callee->token : node->token;
-    CtType native_type;
-    int native = 0;
-    if (callee && callee->kind == N_NAME) {
-        Symbol *symbol = lookup(interpreter->scope, callee->token, 0);
-        if (symbol && symbol->function) function = symbol->function;
-        else if (!symbol) native = builtin_type(callee->token, &native_type);
-    }
-    if (!function && !native) {
-        CtValue pointer = evaluate(interpreter, callee);
-        if (interpreter->failed) return integer(0);
-        if (!type_is_pointer(pointer.type) || !type_is_function(type_target(pointer.type)))
-            return runtime_error(interpreter, name, "call requires a function or a function pointer");
-        function = function_at(interpreter, pointer.as.address);
-        if (!function) return runtime_error(interpreter, name, "call through an invalid function pointer");
-    }
-    if (function && !function->right) return runtime_error(interpreter, name, "function is declared but not defined");
-    if (function && function->variadic) return runtime_error(interpreter, name, "variadic interpreted functions are unsupported");
-    size_t parameters = 0, arguments = 0;
-    if (function) for (Node *p = function->left; p; p = p->next) ++parameters;
-    for (Node *a = node->right; a; a = a->next) ++arguments;
-    if (!native && parameters != arguments) return runtime_error(interpreter, name, "incorrect number of arguments");
-    CtValue *values = arguments ? malloc(arguments * sizeof *values) : NULL;
-    if (arguments && !values) return runtime_error(interpreter, name, "out of memory");
-    size_t index = 0;
-    for (Node *a = node->right; a && !interpreter->failed; a = a->next)
-        values[index++] = evaluate(interpreter, a);
-    if (interpreter->failed) { free(values); return integer(0); }
-    if (native) {
-        CtValue result = builtin_call(interpreter, name, values, arguments);
-        free(values);
-        return result;
-    }
+/* Binds already-evaluated arguments to an interpreted function and runs its body. */
+static CtValue invoke(CtInterpreter *interpreter, Token name, Node *function, const CtValue *values, size_t count) {
+    if (!function->right) return runtime_error(interpreter, name, "function is declared but not defined");
+    if (function->variadic) return runtime_error(interpreter, name, "variadic interpreted functions are unsupported");
+    size_t parameters = 0;
+    for (Node *p = function->left; p; p = p->next) ++parameters;
+    if (parameters != count) return runtime_error(interpreter, name, "incorrect number of arguments");
     Scope *caller = interpreter->scope;
     Scope frame = {.parent = &interpreter->globals};
     interpreter->scope = &frame;
-    index = 0;
+    size_t index = 0;
     for (Node *p = function->left; p && !interpreter->failed; p = p->next) {
         Symbol *parameter = define(interpreter, p->token, p->type);
         if (!parameter) break;
@@ -696,7 +685,6 @@ static CtValue call(CtInterpreter *interpreter, Node *node) {
         if (!parameter->address) { (void)memory_error(interpreter, p->token); break; }
         (void)store_value(interpreter, p->token, (Lvalue){parameter->address, p->type, 0}, values[index++]);
     }
-    free(values);
     Execution execution = {0};
     if (!interpreter->failed) execution = sequence(interpreter, function->right->left);
     CtType returns = type_target(function->type);
@@ -718,6 +706,55 @@ static CtValue call(CtInterpreter *interpreter, Node *node) {
     return result;
 }
 
+/* Library functions such as qsort reach interpreted callbacks through this. */
+CtValue runtime_invoke(CtInterpreter *interpreter, Token name, CtValue pointer, const CtValue *values, size_t count) {
+    if (!type_is_pointer(pointer.type) || !type_is_function(type_target(pointer.type)))
+        return runtime_error(interpreter, name, "a callback requires a function pointer");
+    Node *function = function_at(interpreter, pointer.as.address);
+    if (!function) return runtime_error(interpreter, name, "callback through an invalid function pointer");
+    if (++interpreter->depth > interpreter->depth_limit) {
+        --interpreter->depth;
+        return runtime_error(interpreter, name, "evaluation nesting limit exceeded");
+    }
+    CtValue result = invoke(interpreter, name, function, values, count);
+    --interpreter->depth;
+    return result;
+}
+
+static CtValue call(CtInterpreter *interpreter, Node *node) {
+    Node *callee = node->left;
+    Node *function = NULL;
+    Token name = callee && callee->kind == N_NAME ? callee->token : node->token;
+    CtType native_type;
+    int native = 0;
+    if (callee && callee->kind == N_NAME) {
+        Symbol *symbol = lookup(interpreter->scope, callee->token, 0);
+        if (symbol && symbol->function) function = symbol->function;
+        else if (!symbol) native = builtin_type(callee->token, &native_type);
+    }
+    if (!function && !native) {
+        CtValue pointer = evaluate(interpreter, callee);
+        if (interpreter->failed) return integer(0);
+        if (!type_is_pointer(pointer.type) || !type_is_function(type_target(pointer.type)))
+            return runtime_error(interpreter, name, "call requires a function or a function pointer");
+        function = function_at(interpreter, pointer.as.address);
+        if (!function) return runtime_error(interpreter, name, "call through an invalid function pointer");
+    }
+    size_t arguments = 0;
+    for (Node *a = node->right; a; a = a->next) ++arguments;
+    CtValue *values = arguments ? malloc(arguments * sizeof *values) : NULL;
+    if (arguments && !values) return runtime_error(interpreter, name, "out of memory");
+    size_t index = 0;
+    for (Node *a = node->right; a && !interpreter->failed; a = a->next)
+        values[index++] = evaluate(interpreter, a);
+    CtValue result = integer(0);
+    if (!interpreter->failed)
+        result = native ? builtin_call(interpreter, name, values, arguments)
+                        : invoke(interpreter, name, function, values, arguments);
+    free(values);
+    return result;
+}
+
 static CtValue evaluate_inner(CtInterpreter *interpreter, Node *node) {
     switch (node->kind) {
         case N_VALUE: return node->token.value;
@@ -736,18 +773,15 @@ static CtValue evaluate_inner(CtInterpreter *interpreter, Node *node) {
         }
         case N_NAME: {
             Symbol *symbol = lookup(interpreter->scope, node->token, 0);
-            if (!symbol) {
-                CtValue value;
-                if (builtin_value(interpreter, node->token, &value)) return value;
-                return runtime_error(interpreter, node->token, "unknown variable");
-            }
+            CtValue value;
+            if (!symbol && builtin_value(interpreter, node->token, &value)) return value;
             return load(interpreter, node->token, lvalue(interpreter, node));
         }
         case N_INDEX: case N_MEMBER: case N_COMPOUND:
             return load(interpreter, node->token, lvalue(interpreter, node));
         case N_CAST: {
             CtValue value = evaluate(interpreter, node->left);
-            return interpreter->failed ? integer(0) : runtime_convert(interpreter, node->token, value, node->type);
+            return interpreter->failed ? integer(0) : convert(interpreter, node->token, value, node->type, 1);
         }
         case N_SIZEOF: case N_ALIGNOF: {
             CtType type = node->left ? object_type(interpreter, node->left, 0) : node->type;

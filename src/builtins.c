@@ -27,27 +27,47 @@ static CtType return_type(ReturnKind kind) {
     }
 }
 
-static const struct { const char *name; ReturnKind type; } signatures[] = {
-    {"printf", RT_INT}, {"puts", RT_INT}, {"putchar", RT_INT}, {"getchar", RT_INT},
-    {"sprintf", RT_INT}, {"snprintf", RT_INT}, {"fprintf", RT_INT},
-    {"scanf", RT_INT}, {"sscanf", RT_INT}, {"fscanf", RT_INT},
-    {"fopen", RT_VOID_POINTER}, {"fclose", RT_INT}, {"fflush", RT_INT}, {"fgetc", RT_INT},
-    {"fputc", RT_INT}, {"fputs", RT_INT}, {"fgets", RT_CHAR_POINTER},
-    {"fread", RT_INT}, {"fwrite", RT_INT}, {"fseek", RT_INT}, {"ftell", RT_INT},
-    {"rewind", RT_VOID}, {"feof", RT_INT}, {"ferror", RT_INT}, {"clearerr", RT_VOID},
-    {"remove", RT_INT}, {"rename", RT_INT}, {"getenv", RT_CHAR_POINTER}, {"strerror", RT_CHAR_POINTER},
-    {"malloc", RT_VOID_POINTER}, {"calloc", RT_VOID_POINTER}, {"realloc", RT_VOID_POINTER}, {"free", RT_VOID},
-    {"strlen", RT_INT}, {"strcmp", RT_INT}, {"strncmp", RT_INT}, {"strcpy", RT_CHAR_POINTER},
-    {"strncpy", RT_CHAR_POINTER}, {"strcat", RT_CHAR_POINTER}, {"strchr", RT_CHAR_POINTER}, {"strstr", RT_CHAR_POINTER},
-    {"memcpy", RT_VOID_POINTER}, {"memmove", RT_VOID_POINTER}, {"memset", RT_VOID_POINTER}, {"memcmp", RT_INT},
-    {"atoi", RT_INT}, {"atof", RT_DOUBLE}, {"abs", RT_INT}, {"rand", RT_INT}, {"srand", RT_VOID},
-    {"exit", RT_VOID}, {"sqrt", RT_DOUBLE}, {"pow", RT_DOUBLE}, {"sin", RT_DOUBLE}, {"cos", RT_DOUBLE},
-    {"tan", RT_DOUBLE}, {"asin", RT_DOUBLE}, {"acos", RT_DOUBLE}, {"atan", RT_DOUBLE},
-    {"exp", RT_DOUBLE}, {"log", RT_DOUBLE}, {"log10", RT_DOUBLE}, {"floor", RT_DOUBLE},
-    {"ceil", RT_DOUBLE}, {"round", RT_DOUBLE}, {"trunc", RT_DOUBLE}, {"fabs", RT_DOUBLE},
-    {"fmod", RT_DOUBLE}, {"atan2", RT_DOUBLE}, {"clock", RT_INT},
-    {"isdigit", RT_INT}, {"isalpha", RT_INT}, {"isalnum", RT_INT}, {"isspace", RT_INT},
-    {"isupper", RT_INT}, {"islower", RT_INT}, {"toupper", RT_INT}, {"tolower", RT_INT}
+#define VARIADIC 255
+
+static const struct { const char *name; ReturnKind type; unsigned char arity; } signatures[] = {
+    {"printf", RT_INT, VARIADIC}, {"sprintf", RT_INT, VARIADIC}, {"snprintf", RT_INT, VARIADIC},
+    {"fprintf", RT_INT, VARIADIC}, {"scanf", RT_INT, VARIADIC}, {"sscanf", RT_INT, VARIADIC},
+    {"fscanf", RT_INT, VARIADIC},
+    {"puts", RT_INT, 1}, {"putchar", RT_INT, 1}, {"getchar", RT_INT, 0}, {"perror", RT_VOID, 1},
+    {"fopen", RT_VOID_POINTER, 2}, {"fclose", RT_INT, 1}, {"fflush", RT_INT, 1}, {"fgetc", RT_INT, 1},
+    {"fputc", RT_INT, 2}, {"fputs", RT_INT, 2}, {"fgets", RT_CHAR_POINTER, 3},
+    {"getc", RT_INT, 1}, {"putc", RT_INT, 2}, {"ungetc", RT_INT, 2},
+    {"fread", RT_INT, 4}, {"fwrite", RT_INT, 4}, {"fseek", RT_INT, 3}, {"ftell", RT_INT, 1},
+    {"rewind", RT_VOID, 1}, {"feof", RT_INT, 1}, {"ferror", RT_INT, 1}, {"clearerr", RT_VOID, 1},
+    {"remove", RT_INT, 1}, {"rename", RT_INT, 2}, {"getenv", RT_CHAR_POINTER, 1}, {"strerror", RT_CHAR_POINTER, 1},
+    {"malloc", RT_VOID_POINTER, 1}, {"calloc", RT_VOID_POINTER, 2}, {"realloc", RT_VOID_POINTER, 2},
+    {"free", RT_VOID, 1},
+    {"strlen", RT_INT, 1}, {"strcmp", RT_INT, 2}, {"strncmp", RT_INT, 3}, {"strcpy", RT_CHAR_POINTER, 2},
+    {"strncpy", RT_CHAR_POINTER, 3}, {"strcat", RT_CHAR_POINTER, 2}, {"strncat", RT_CHAR_POINTER, 3},
+    {"strchr", RT_CHAR_POINTER, 2}, {"strrchr", RT_CHAR_POINTER, 2}, {"strstr", RT_CHAR_POINTER, 2},
+    {"strspn", RT_INT, 2}, {"strcspn", RT_INT, 2}, {"strpbrk", RT_CHAR_POINTER, 2}, {"strtok", RT_CHAR_POINTER, 2},
+    {"memcpy", RT_VOID_POINTER, 3}, {"memmove", RT_VOID_POINTER, 3}, {"memset", RT_VOID_POINTER, 3},
+    {"memcmp", RT_INT, 3}, {"memchr", RT_VOID_POINTER, 3},
+    {"atoi", RT_INT, 1}, {"atol", RT_INT, 1}, {"atof", RT_DOUBLE, 1},
+    {"strtol", RT_INT, 3}, {"strtod", RT_DOUBLE, 2},
+    {"abs", RT_INT, 1}, {"labs", RT_INT, 1}, {"rand", RT_INT, 0}, {"srand", RT_VOID, 1},
+    {"qsort", RT_VOID, 4}, {"bsearch", RT_VOID_POINTER, 5}, {"abort", RT_VOID, 0}, {"exit", RT_VOID, 1},
+    {"sqrt", RT_DOUBLE, 1}, {"cbrt", RT_DOUBLE, 1}, {"pow", RT_DOUBLE, 2}, {"hypot", RT_DOUBLE, 2},
+    {"sin", RT_DOUBLE, 1}, {"cos", RT_DOUBLE, 1}, {"tan", RT_DOUBLE, 1},
+    {"asin", RT_DOUBLE, 1}, {"acos", RT_DOUBLE, 1}, {"atan", RT_DOUBLE, 1}, {"atan2", RT_DOUBLE, 2},
+    {"sinh", RT_DOUBLE, 1}, {"cosh", RT_DOUBLE, 1}, {"tanh", RT_DOUBLE, 1},
+    {"asinh", RT_DOUBLE, 1}, {"acosh", RT_DOUBLE, 1}, {"atanh", RT_DOUBLE, 1},
+    {"exp", RT_DOUBLE, 1}, {"exp2", RT_DOUBLE, 1}, {"log", RT_DOUBLE, 1}, {"log2", RT_DOUBLE, 1},
+    {"log10", RT_DOUBLE, 1}, {"ldexp", RT_DOUBLE, 2},
+    {"floor", RT_DOUBLE, 1}, {"ceil", RT_DOUBLE, 1}, {"round", RT_DOUBLE, 1}, {"trunc", RT_DOUBLE, 1},
+    {"fabs", RT_DOUBLE, 1}, {"fmod", RT_DOUBLE, 2}, {"fmin", RT_DOUBLE, 2}, {"fmax", RT_DOUBLE, 2},
+    {"fdim", RT_DOUBLE, 2}, {"copysign", RT_DOUBLE, 2},
+    {"time", RT_INT, 1}, {"difftime", RT_DOUBLE, 2}, {"clock", RT_INT, 0},
+    {"isdigit", RT_INT, 1}, {"isalpha", RT_INT, 1}, {"isalnum", RT_INT, 1}, {"isspace", RT_INT, 1},
+    {"isupper", RT_INT, 1}, {"islower", RT_INT, 1}, {"ispunct", RT_INT, 1}, {"isprint", RT_INT, 1},
+    {"isgraph", RT_INT, 1}, {"iscntrl", RT_INT, 1}, {"isxdigit", RT_INT, 1}, {"isblank", RT_INT, 1},
+    {"toupper", RT_INT, 1}, {"tolower", RT_INT, 1},
+    {"__assert_fail", RT_INT, 3}
 };
 
 int builtin_type(Token name, CtType *type) {
@@ -56,8 +76,12 @@ int builtin_type(Token name, CtType *type) {
     return 0;
 }
 
-static int require_count(CtInterpreter *interpreter, Token name, size_t count, size_t expected) {
-    if (count == expected) return 1;
+static int require_count(CtInterpreter *interpreter, Token name, size_t count) {
+    for (size_t i = 0; i < sizeof signatures / sizeof signatures[0]; ++i)
+        if (named(name, signatures[i].name)) {
+            if (signatures[i].arity == VARIADIC || signatures[i].arity == count) return 1;
+            break;
+        }
     (void)runtime_error(interpreter, name, "incorrect number of library arguments");
     return 0;
 }
@@ -132,7 +156,7 @@ static FILE *file_stream(CtInterpreter *interpreter, HostFile *file) {
 }
 
 static CtValue copy_string(CtInterpreter *interpreter, Token name, const char *text) {
-    if (!text) return (CtValue){.type = RT_CHAR_POINTER};
+    if (!text) return (CtValue){.type = CHAR_POINTER};
     size_t size = strlen(text) + 1;
     uint64_t address = memory_allocate(&interpreter->memory, size, 1, 0);
     if (!address) return runtime_error(interpreter, name, interpreter->memory.error);
@@ -141,8 +165,33 @@ static CtValue copy_string(CtInterpreter *interpreter, Token name, const char *t
     return (CtValue){.type = CHAR_POINTER, .as.address = address};
 }
 
+static uint64_t errno_object(CtInterpreter *interpreter) {
+    if (!interpreter->error_number)
+        interpreter->error_number = memory_allocate(&interpreter->memory, ct_type_size(CT_INT), 1, 0);
+    return interpreter->error_number;
+}
+
+int builtin_object(CtInterpreter *interpreter, Token name, uint64_t *address, CtType *type) {
+    if (!named(name, "errno")) return 0;
+    *address = errno_object(interpreter);
+    *type = CT_INT;
+    if (!*address) (void)runtime_error(interpreter, name, interpreter->memory.error);
+    return 1;
+}
+
+static void set_errno(CtInterpreter *interpreter, int value) {
+    uint64_t address = errno_object(interpreter);
+    if (address) (void)memory_write(&interpreter->memory, address, integer(value));
+}
+
+static int get_errno(CtInterpreter *interpreter) {
+    uint64_t address = errno_object(interpreter);
+    if (!address) return 0;
+    CtValue value = memory_read(&interpreter->memory, address, CT_INT);
+    return interpreter->memory.error ? 0 : value.as.integer;
+}
+
 int builtin_value(CtInterpreter *interpreter, Token name, CtValue *value) {
-    if (named(name, "errno")) { *value = integer(interpreter->error_number); return 1; }
     int standard = named(name, "stdin") ? 1 : named(name, "stdout") ? 2 : named(name, "stderr") ? 3 : 0;
     if (!standard) return 0;
     for (HostFile *file = interpreter->files; file; file = file->next)
@@ -471,19 +520,15 @@ static CtValue scanned(CtInterpreter *interpreter, Token name, const CtValue *ar
 }
 
 static CtValue file_call(CtInterpreter *interpreter, Token name, const CtValue *args, size_t count) {
-    size_t expected = 1;
-    if (named(name, "fopen") || named(name, "fputc") || named(name, "fputs") || named(name, "rename")) expected = 2;
-    if (named(name, "fgets") || named(name, "fseek")) expected = 3;
-    if (named(name, "fread") || named(name, "fwrite")) expected = 4;
-    if (!require_count(interpreter, name, count, expected)) return integer(0);
+    if (!require_count(interpreter, name, count)) return integer(0);
     errno = 0;
     if (named(name, "fopen")) {
         char *path = string(interpreter, name, args[0]);
         char *mode = string(interpreter, name, args[1]);
         if (interpreter->failed) return integer(0);
         FILE *stream = fopen(path, mode);
-        interpreter->error_number = errno;
-        if (!stream) return (CtValue){.type = RT_VOID_POINTER};
+        set_errno(interpreter, errno);
+        if (!stream) return (CtValue){.type = VOID_POINTER};
         CtValue value = host_file(interpreter, name, stream, 0);
         if (interpreter->failed) fclose(stream);
         return value;
@@ -498,10 +543,11 @@ static CtValue file_call(CtInterpreter *interpreter, Token name, const CtValue *
         if (interpreter->failed) return integer(0);
         if (named(name, "getenv")) return copy_string(interpreter, name, getenv(path));
         int result = target ? rename(path, target) : remove(path);
-        interpreter->error_number = errno;
+        set_errno(interpreter, errno);
         return integer(result);
     }
-    size_t stream_index = named(name, "fputc") || named(name, "fputs") ? 1 : named(name, "fgets") ? 2 :
+    size_t stream_index = named(name, "fputc") || named(name, "fputs") || named(name, "putc") ||
+                          named(name, "ungetc") ? 1 : named(name, "fgets") ? 2 :
                           named(name, "fread") || named(name, "fwrite") ? 3 : 0;
     if (named(name, "fflush") && ((args[0].type == CT_INT && args[0].as.integer == 0) ||
         (type_is_pointer(args[0].type) && args[0].as.address == 0))) return integer(fflush(NULL));
@@ -515,8 +561,11 @@ static CtValue file_call(CtInterpreter *interpreter, Token name, const CtValue *
         file->closed = 1;
         (void)memory_release(&interpreter->memory, file->address, 0);
     } else if (named(name, "fflush")) result = fflush(stream);
-    else if (named(name, "fgetc")) result = fgetc(stream);
-    else if (named(name, "fputc")) {
+    else if (named(name, "fgetc") || named(name, "getc")) result = fgetc(stream);
+    else if (named(name, "ungetc")) {
+        int character = number(interpreter, name, args[0]);
+        if (!interpreter->failed) result = ungetc(character, stream);
+    } else if (named(name, "fputc") || named(name, "putc")) {
         int character = number(interpreter, name, args[0]);
         if (!interpreter->failed) result = fputc(character, stream);
     } else if (named(name, "fputs")) {
@@ -530,7 +579,7 @@ static CtValue file_call(CtInterpreter *interpreter, Token name, const CtValue *
         if (!target) return integer(0);
         char *read = fgets(target, size, stream);
         if (read) (void)memory_access(&interpreter->memory, address, strlen(read) + 1, 1);
-        interpreter->error_number = errno;
+        set_errno(interpreter, errno);
         return (CtValue){.type = CHAR_POINTER, .as.address = read ? address : 0};
     } else if (named(name, "fread") || named(name, "fwrite")) {
         uint64_t address = pointer(interpreter, name, args[0]);
@@ -561,8 +610,8 @@ static CtValue file_call(CtInterpreter *interpreter, Token name, const CtValue *
     else if (named(name, "feof")) result = feof(stream);
     else if (named(name, "ferror")) result = ferror(stream);
     else if (named(name, "clearerr")) clearerr(stream);
-    interpreter->error_number = errno;
-    if (named(name, "rewind") || named(name, "clearerr")) return (CtValue){.type = RT_VOID};
+    set_errno(interpreter, errno);
+    if (named(name, "rewind") || named(name, "clearerr")) return (CtValue){.type = CT_VOID};
     return integer(result);
 }
 
@@ -573,23 +622,16 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
         named(name, "fputc") || named(name, "fputs") || named(name, "fgets") || named(name, "fread") ||
         named(name, "fwrite") || named(name, "fseek") || named(name, "ftell") || named(name, "rewind") ||
         named(name, "feof") || named(name, "ferror") || named(name, "clearerr") || named(name, "remove") ||
-        named(name, "rename") || named(name, "getenv") || named(name, "strerror")) return file_call(interpreter, name, args, count);
-    if (named(name, "getchar") || named(name, "rand") || named(name, "clock")) {
-        if (!require_count(interpreter, name, count, 0)) return integer(0);
-        if (named(name, "getchar")) return integer(fgetc(interpreter->input));
-        if (named(name, "rand")) {
-            interpreter->random_state = interpreter->random_state * 1103515245u + 12345u;
-            return integer((int)((interpreter->random_state / 65536u) % 32768u));
-        }
-        return integer((int)clock());
+        named(name, "rename") || named(name, "getenv") || named(name, "strerror") ||
+        named(name, "getc") || named(name, "putc") || named(name, "ungetc")) return file_call(interpreter, name, args, count);
+    if (!require_count(interpreter, name, count)) return integer(0);
+    if (named(name, "getchar")) return integer(fgetc(interpreter->input));
+    if (named(name, "clock")) return integer((int)clock());
+    if (named(name, "rand")) {
+        interpreter->random_state = interpreter->random_state * 1103515245u + 12345u;
+        return integer((int)((interpreter->random_state / 65536u) % 32768u));
     }
-    size_t expected = 1;
-    if (named(name, "calloc") || named(name, "realloc") || named(name, "strcmp") || named(name, "strcpy") ||
-        named(name, "strcat") || named(name, "strchr") || named(name, "strstr") || named(name, "pow") ||
-        named(name, "fmod") || named(name, "atan2")) expected = 2;
-    if (named(name, "strncmp") || named(name, "strncpy") || named(name, "memcpy") || named(name, "memmove") ||
-        named(name, "memset") || named(name, "memcmp")) expected = 3;
-    if (!require_count(interpreter, name, count, expected)) return integer(0);
+    if (named(name, "abort")) return runtime_error(interpreter, name, "the program called abort");
     if (named(name, "puts")) {
         char *text = string(interpreter, name, args[0]);
         if (!text) return integer(EOF);
@@ -633,20 +675,22 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
         uint64_t address = pointer(interpreter, name, args[0]);
         if (!interpreter->failed && !memory_release(&interpreter->memory, address, 1))
             return runtime_error(interpreter, name, interpreter->memory.error);
-        return (CtValue){.type = RT_VOID};
+        return (CtValue){.type = CT_VOID};
     }
     if (named(name, "strlen") || named(name, "strcmp") || named(name, "strncmp") || named(name, "strcpy") ||
-        named(name, "strncpy") || named(name, "strcat") || named(name, "strchr") || named(name, "strstr") ||
-        named(name, "atoi") || named(name, "atof")) {
+        named(name, "strncpy") || named(name, "strcat") || named(name, "strncat") || named(name, "strchr") ||
+        named(name, "strrchr") || named(name, "strstr") || named(name, "strspn") || named(name, "strcspn") ||
+        named(name, "strpbrk") || named(name, "atoi") || named(name, "atol") || named(name, "atof")) {
         int copying = named(name, "strcpy") || named(name, "strncpy");
+        int character_argument = named(name, "strchr") || named(name, "strrchr");
         char *a = copying ? NULL : string(interpreter, name, args[0]);
-        char *b = count > 1 && !named(name, "strchr") ? string(interpreter, name, args[1]) : NULL;
+        char *b = count > 1 && !character_argument ? string(interpreter, name, args[1]) : NULL;
         if (interpreter->failed) return integer(0);
         if (named(name, "strlen")) return integer((int)strlen(a));
-        if (named(name, "atoi")) {
+        if (named(name, "atoi") || named(name, "atol")) {
             errno = 0;
             long value = strtol(a, NULL, 10);
-            if (errno == ERANGE || value < INT_MIN || value > INT_MAX) return runtime_error(interpreter, name, "atoi result out of range");
+            if (errno == ERANGE || value < INT_MIN || value > INT_MAX) return runtime_error(interpreter, name, "atoi result is out of range");
             return integer((int)value);
         }
         if (named(name, "atof")) {
@@ -660,24 +704,44 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
             size_t n = size_argument(interpreter, name, args[2]);
             return interpreter->failed ? integer(0) : integer(strncmp(a, b, n));
         }
-        if (named(name, "strchr") || named(name, "strstr")) {
-            int character = named(name, "strchr") ? number(interpreter, name, args[1]) : 0;
+        if (named(name, "strspn")) return integer((int)strspn(a, b));
+        if (named(name, "strcspn")) return integer((int)strcspn(a, b));
+        if (named(name, "strchr") || named(name, "strrchr") || named(name, "strstr") || named(name, "strpbrk")) {
+            int character = named(name, "strstr") || named(name, "strpbrk") ? 0 : number(interpreter, name, args[1]);
             if (interpreter->failed) return integer(0);
-            char *found = named(name, "strchr") ? strchr(a, character) : strstr(a, b);
+            char *found = named(name, "strchr") ? strchr(a, character)
+                        : named(name, "strrchr") ? strrchr(a, character)
+                        : named(name, "strpbrk") ? strpbrk(a, b) : strstr(a, b);
             return (CtValue){.type = CHAR_POINTER, .as.address = found ? args[0].as.address + (uint64_t)(found - a) : 0};
         }
         uint64_t address = pointer(interpreter, name, args[0]);
-        size_t prefix = named(name, "strcat") ? strlen(a) : 0;
-        size_t bytes = named(name, "strncpy") ? size_argument(interpreter, name, args[2]) : strlen(b) + 1;
+        int appending = named(name, "strcat") || named(name, "strncat");
+        size_t prefix = appending ? strlen(a) : 0;
+        size_t limit = named(name, "strncpy") || named(name, "strncat") ? size_argument(interpreter, name, args[2]) : 0;
+        size_t bytes = named(name, "strncpy") ? limit
+                     : named(name, "strncat") ? (strlen(b) < limit ? strlen(b) : limit) + 1
+                     : strlen(b) + 1;
         char *destination = access_memory(interpreter, name, address + prefix, bytes, 1);
         if (destination) {
             if (named(name, "strncpy")) {
                 size_t copied = strlen(b) < bytes ? strlen(b) : bytes;
                 memmove(destination, b, copied);
                 memset(destination + copied, 0, bytes - copied);
+            } else if (named(name, "strncat")) {
+                memmove(destination, b, bytes - 1);
+                destination[bytes - 1] = '\0';
             } else memmove(destination, b, bytes);
         }
         return (CtValue){.type = CHAR_POINTER, .as.address = address};
+    }
+    if (named(name, "memchr")) {
+        uint64_t address = pointer(interpreter, name, args[0]);
+        int character = number(interpreter, name, args[1]);
+        size_t bytes = size_argument(interpreter, name, args[2]);
+        void *data = access_memory(interpreter, name, address, bytes, 0);
+        if (!data) return integer(0);
+        unsigned char *found = memchr(data, character, bytes);
+        return (CtValue){.type = VOID_POINTER, .as.address = found ? address + (uint64_t)(found - (unsigned char *)data) : 0};
     }
     if (named(name, "memcpy") || named(name, "memmove") || named(name, "memset") || named(name, "memcmp")) {
         uint64_t destination = pointer(interpreter, name, args[0]);
@@ -693,11 +757,121 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
         else memmove(to, from, bytes);
         return (CtValue){.type = VOID_POINTER, .as.address = destination};
     }
-    if (named(name, "exit") || named(name, "srand") || named(name, "abs")) {
+    if (named(name, "perror")) {
+        char *prefix = string(interpreter, name, args[0]);
+        if (!interpreter->failed)
+            fprintf(interpreter->errors, "%s%s%s\n", prefix && *prefix ? prefix : "",
+                    prefix && *prefix ? ": " : "", strerror(get_errno(interpreter)));
+        return (CtValue){.type = CT_VOID};
+    }
+    if (named(name, "time")) {
+        time_t now = time(NULL);
+        if (now == (time_t)-1 || (double)now > (double)INT_MAX)
+            return runtime_error(interpreter, name, "the clock is outside the supported int range");
+        uint64_t destination = pointer(interpreter, name, args[0]);
+        if (destination && !memory_write(&interpreter->memory, destination, integer((int)now)))
+            return runtime_error(interpreter, name, interpreter->memory.error);
+        return integer((int)now);
+    }
+    if (named(name, "__assert_fail")) {
+        char *expression = string(interpreter, name, args[0]);
+        char *file = string(interpreter, name, args[1]);
+        int line = number(interpreter, name, args[2]);
+        if (interpreter->failed) return integer(0);
+        char message[192];
+        (void)snprintf(message, sizeof message, "assertion failed: %s (%s:%d)", expression, file, line);
+        return runtime_error(interpreter, name, message);
+    }
+    if (named(name, "strtol") || named(name, "strtod")) {
+        char *text = string(interpreter, name, args[0]);
+        int base = named(name, "strtol") ? number(interpreter, name, args[2]) : 0;
+        if (interpreter->failed) return integer(0);
+        if (named(name, "strtol") && base != 0 && (base < 2 || base > 36))
+            return runtime_error(interpreter, name, "strtol requires a base of 0 or 2 through 36");
+        char *end = NULL;
+        errno = 0;
+        double real_result = 0;
+        long integer_result = 0;
+        if (named(name, "strtol")) integer_result = strtol(text, &end, base);
+        else real_result = strtod(text, &end);
+        set_errno(interpreter, errno);
+        uint64_t destination = pointer(interpreter, name, args[1]);
+        if (destination) {
+            CtValue position = {.type = CHAR_POINTER, .as.address = args[0].as.address + (uint64_t)(end - text)};
+            if (!memory_write(&interpreter->memory, destination, position))
+                return runtime_error(interpreter, name, interpreter->memory.error);
+        }
+        if (named(name, "strtod")) return (CtValue){.type = CT_DOUBLE, .as.real = real_result};
+        if (integer_result < INT_MIN || integer_result > INT_MAX)
+            return runtime_error(interpreter, name, "strtol result is outside the supported int range");
+        return integer((int)integer_result);
+    }
+    if (named(name, "strtok")) {
+        char *separators = string(interpreter, name, args[1]);
+        uint64_t address = args[0].type == CT_INT && !args[0].as.integer ? 0 : pointer(interpreter, name, args[0]);
+        if (!address) address = interpreter->token_state;
+        if (interpreter->failed || !address) return (CtValue){.type = CHAR_POINTER};
+        char *text = memory_string(&interpreter->memory, address);
+        if (!text) return runtime_error(interpreter, name, interpreter->memory.error);
+        size_t start = strspn(text, separators);
+        if (!text[start]) { interpreter->token_state = 0; return (CtValue){.type = CHAR_POINTER}; }
+        size_t length = strcspn(text + start, separators);
+        if (text[start + length]) {
+            char *terminator = access_memory(interpreter, name, address + start + length, 1, 1);
+            if (!terminator) return integer(0);
+            *terminator = '\0';
+            interpreter->token_state = address + start + length + 1;
+        } else interpreter->token_state = 0;
+        return (CtValue){.type = CHAR_POINTER, .as.address = address + start};
+    }
+    if (named(name, "qsort") || named(name, "bsearch")) {
+        int searching = named(name, "bsearch");
+        uint64_t base = pointer(interpreter, name, args[searching]);
+        size_t elements = size_argument(interpreter, name, args[searching + 1]);
+        size_t width = size_argument(interpreter, name, args[searching + 2]);
+        CtValue compare = args[searching + 3];
+        if (interpreter->failed) return integer(0);
+        if (width && elements > SIZE_MAX / width) return runtime_error(interpreter, name, "array size overflow");
+        if (!elements || !width) return searching ? (CtValue){.type = VOID_POINTER} : (CtValue){.type = CT_VOID};
+        if (!access_memory(interpreter, name, base, elements * width, 0)) return integer(0);
+        unsigned char *data = access_memory(interpreter, name, base, elements * width, 1);
+        if (!data) return integer(0);
+        CtValue pair[2] = {{.type = VOID_POINTER}, {.type = VOID_POINTER}};
+        if (searching) {
+            pair[0] = args[0];
+            size_t low = 0, high = elements;
+            while (low < high && !interpreter->failed) {
+                size_t middle = low + (high - low) / 2;
+                pair[1] = (CtValue){.type = VOID_POINTER, .as.address = base + middle * width};
+                CtValue order = runtime_invoke(interpreter, name, compare, pair, 2);
+                if (interpreter->failed) return integer(0);
+                if (!order.as.integer) return pair[1];
+                if (order.as.integer < 0) high = middle;
+                else low = middle + 1;
+            }
+            return (CtValue){.type = VOID_POINTER};
+        }
+        unsigned char *scratch = malloc(width);
+        if (!scratch) return runtime_error(interpreter, name, "out of memory");
+        for (size_t gap = elements / 2; gap && !interpreter->failed; gap /= 2)
+            for (size_t i = gap; i < elements && !interpreter->failed; ++i)
+                for (size_t j = i; j >= gap; j -= gap) {
+                    pair[0] = (CtValue){.type = VOID_POINTER, .as.address = base + (j - gap) * width};
+                    pair[1] = (CtValue){.type = VOID_POINTER, .as.address = base + j * width};
+                    CtValue order = runtime_invoke(interpreter, name, compare, pair, 2);
+                    if (interpreter->failed || order.as.integer <= 0) break;
+                    memcpy(scratch, data + (j - gap) * width, width);
+                    memcpy(data + (j - gap) * width, data + j * width, width);
+                    memcpy(data + j * width, scratch, width);
+                }
+        free(scratch);
+        return (CtValue){.type = CT_VOID};
+    }
+    if (named(name, "exit") || named(name, "srand") || named(name, "abs") || named(name, "labs")) {
         int value = number(interpreter, name, args[0]);
         if (interpreter->failed) return integer(0);
-        if (named(name, "exit")) { interpreter->exit_requested = 1; interpreter->exit_status = value; return (CtValue){.type = RT_VOID}; }
-        if (named(name, "srand")) { interpreter->random_state = (unsigned)value; return (CtValue){.type = RT_VOID}; }
+        if (named(name, "exit")) { interpreter->exit_requested = 1; interpreter->exit_status = value; return (CtValue){.type = CT_VOID}; }
+        if (named(name, "srand")) { interpreter->random_state = (unsigned)value; return (CtValue){.type = CT_VOID}; }
         if (value == INT_MIN) return runtime_error(interpreter, name, "abs result overflows int");
         return integer(abs(value));
     }
@@ -711,6 +885,12 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
         if (named(name, "isspace")) return integer(isspace(value));
         if (named(name, "isupper")) return integer(isupper(value));
         if (named(name, "islower")) return integer(islower(value));
+        if (named(name, "ispunct")) return integer(ispunct(value));
+        if (named(name, "isprint")) return integer(isprint(value));
+        if (named(name, "isgraph")) return integer(isgraph(value));
+        if (named(name, "iscntrl")) return integer(iscntrl(value));
+        if (named(name, "isxdigit")) return integer(isxdigit(value));
+        if (named(name, "isblank")) return integer(value == ' ' || value == '\t');
         return integer(named(name, "toupper") ? toupper(value) : tolower(value));
     }
     double a = real_number(interpreter, name, args[0]);
@@ -719,6 +899,22 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
     double value = 0;
     errno = 0;
     if (named(name, "sqrt")) value = sqrt(a);
+    else if (named(name, "cbrt")) value = cbrt(a);
+    else if (named(name, "hypot")) value = hypot(a, b);
+    else if (named(name, "sinh")) value = sinh(a);
+    else if (named(name, "cosh")) value = cosh(a);
+    else if (named(name, "tanh")) value = tanh(a);
+    else if (named(name, "asinh")) value = asinh(a);
+    else if (named(name, "acosh")) value = acosh(a);
+    else if (named(name, "atanh")) value = atanh(a);
+    else if (named(name, "exp2")) value = exp2(a);
+    else if (named(name, "log2")) value = log2(a);
+    else if (named(name, "ldexp")) value = ldexp(a, (int)b);
+    else if (named(name, "fmin")) value = fmin(a, b);
+    else if (named(name, "fmax")) value = fmax(a, b);
+    else if (named(name, "fdim")) value = fdim(a, b);
+    else if (named(name, "copysign")) value = copysign(a, b);
+    else if (named(name, "difftime")) value = a - b;
     else if (named(name, "pow")) value = pow(a, b);
     else if (named(name, "sin")) value = sin(a);
     else if (named(name, "cos")) value = cos(a);

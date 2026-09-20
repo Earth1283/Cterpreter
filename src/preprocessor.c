@@ -1,10 +1,13 @@
 #include "preprocessor.h"
 
 #include <ctype.h>
+#include <errno.h>
+#include <float.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define PP_DEPTH 64
 
@@ -15,6 +18,7 @@ typedef struct {
     const char *file;
     size_t line;
     int failed;
+    char renamed[256];
 } Expansion;
 
 static char *copy(const char *source, size_t length) {
@@ -87,10 +91,22 @@ void preprocessor_destroy(Preprocessor *preprocessor) {
         macro_destroy(preprocessor->macros);
         preprocessor->macros = next;
     }
+    for (size_t i = 0; i < preprocessor->once_count; ++i) free(preprocessor->once[i]);
+    free(preprocessor->once);
+    preprocessor->once = NULL;
+    preprocessor->once_count = 0;
 }
 
 int preprocessor_copy(Preprocessor *target, const Preprocessor *source) {
-    *target = (Preprocessor){0};
+    *target = (Preprocessor){.counter = source->counter, .initialized = source->initialized};
+    if (source->once_count) {
+        target->once = calloc(source->once_count, sizeof *target->once);
+        if (!target->once) goto failed;
+        for (size_t i = 0; i < source->once_count; ++i) {
+            target->once[target->once_count++] = copy(source->once[i], strlen(source->once[i]));
+            if (!target->once[i]) goto failed;
+        }
+    }
     for (Macro *macro = source->macros; macro; macro = macro->next) {
         Macro *item = calloc(1, sizeof *item);
         if (!item) goto failed;
@@ -221,6 +237,13 @@ static void expand(Expansion *expansion, const char *source, Text *result, Macro
             cursor = end;
             continue;
         }
+        if (length == 11 && !memcmp(cursor, "__COUNTER__", 11)) {
+            char counter[32];
+            (void)snprintf(counter, sizeof counter, "%zu", expansion->preprocessor->counter++);
+            emit(expansion, result, counter, strlen(counter));
+            cursor = end;
+            continue;
+        }
         Macro *macro = find(expansion->preprocessor, cursor, length);
         for (size_t i = 0; macro && i < depth; ++i) if (disabled[i] == macro) macro = NULL;
         const char *after = spaces(end);
@@ -264,6 +287,36 @@ static void expand(Expansion *expansion, const char *source, Text *result, Macro
         free(args);
         cursor = scan;
     }
+}
+
+/* Only 'once' has meaning here; C requires every other pragma to be ignored. */
+static void pragma(Expansion *expansion, const char *source) {
+    source = spaces(source);
+    if (strncmp(source, "once", 4) || identifier(source[4])) return;
+    Preprocessor *preprocessor = expansion->preprocessor;
+    for (size_t i = 0; i < preprocessor->once_count; ++i)
+        if (!strcmp(preprocessor->once[i], expansion->file)) return;
+    char **grown = realloc(preprocessor->once, (preprocessor->once_count + 1) * sizeof *grown);
+    if (!grown) { fail(expansion, "out of memory"); return; }
+    preprocessor->once = grown;
+    grown[preprocessor->once_count] = copy(expansion->file, strlen(expansion->file));
+    if (!grown[preprocessor->once_count++]) fail(expansion, "out of memory");
+}
+
+static void line_directive(Expansion *expansion, const char *source) {
+    source = spaces(source);
+    char *end = NULL;
+    unsigned long number = strtoul(source, &end, 10);
+    if (end == source || !number) { fail(expansion, "#line requires a positive line number"); return; }
+    expansion->line = number - 1;
+    source = spaces(end);
+    if (*source != '"') return;
+    const char *close = quoted_end(source);
+    size_t length = close > source + 1 ? (size_t)(close - source) - 2 : 0;
+    if (length >= sizeof expansion->renamed) { fail(expansion, "#line file name is too long"); return; }
+    memcpy(expansion->renamed, source + 1, length);
+    expansion->renamed[length] = '\0';
+    expansion->file = expansion->renamed;
 }
 
 static void define(Expansion *expansion, const char *source) {
@@ -390,6 +443,59 @@ static char *clean_source(Expansion *expansion, const char *source) {
 
 static int process(Expansion *expansion, const char *source, Text *output, unsigned depth);
 
+#define PP_COMMON "#define NULL 0\n#define size_t int\n"
+
+/* Standard headers are supplied as definitions; the functions themselves are built in. */
+static char *header_definitions(const char *header) {
+    static const struct { const char *name, *body; } headers[] = {
+        {"stddef.h", PP_COMMON "#define ptrdiff_t int\n"
+                     "#define offsetof(type, member) ((size_t)&((type *)0)->member)\n"},
+        {"stdio.h", PP_COMMON "#define FILE void\n#define EOF (-1)\n#define BUFSIZ 512\n"
+                    "#define SEEK_SET 0\n#define SEEK_CUR 1\n#define SEEK_END 2\n"},
+        {"stdlib.h", PP_COMMON "#define EXIT_SUCCESS 0\n#define EXIT_FAILURE 1\n#define RAND_MAX 32767\n"},
+        {"string.h", PP_COMMON},
+        {"math.h", PP_COMMON},
+        {"ctype.h", ""},
+        {"stdbool.h", "#define bool int\n#define true 1\n#define false 0\n"
+                      "#define __bool_true_false_are_defined 1\n"},
+        {"iso646.h", "#define and &&\n#define and_eq &=\n#define bitand &\n#define bitor |\n"
+                     "#define compl ~\n#define not !\n#define not_eq !=\n#define or ||\n"
+                     "#define or_eq |=\n#define xor ^\n#define xor_eq ^=\n"},
+        {"assert.h", "#undef assert\n#ifdef NDEBUG\n#define assert(e) ((void)0)\n#else\n"
+                     "#define assert(e) ((e) || __assert_fail(#e, __FILE__, __LINE__))\n#endif\n"},
+        {"limits.h", NULL}, {"float.h", NULL}, {"time.h", NULL}, {"errno.h", NULL}
+    };
+    char generated[768] = "";
+    if (!strcmp(header, "limits.h"))
+        (void)snprintf(generated, sizeof generated,
+                       "#define CHAR_BIT %d\n#define SCHAR_MIN (-%d - 1)\n#define SCHAR_MAX %d\n"
+                       "#define UCHAR_MAX %d\n#define CHAR_MIN %d\n#define CHAR_MAX %d\n"
+                       "#define SHRT_MIN (-%d - 1)\n#define SHRT_MAX %d\n#define USHRT_MAX %d\n"
+                       "#define INT_MIN (-%d - 1)\n#define INT_MAX %d\n",
+                       CHAR_BIT, SCHAR_MAX, SCHAR_MAX, UCHAR_MAX, CHAR_MIN, CHAR_MAX,
+                       SHRT_MAX, SHRT_MAX, USHRT_MAX, INT_MAX, INT_MAX);
+    else if (!strcmp(header, "float.h"))
+        (void)snprintf(generated, sizeof generated,
+                       "#define DBL_DIG %d\n#define DBL_MANT_DIG %d\n#define DBL_MAX %.17g\n"
+                       "#define DBL_MIN %.17g\n#define DBL_EPSILON %.17g\n"
+                       "#define DBL_MAX_10_EXP %d\n#define DBL_MIN_10_EXP (%d)\n",
+                       DBL_DIG, DBL_MANT_DIG, DBL_MAX, DBL_MIN, DBL_EPSILON, DBL_MAX_10_EXP, DBL_MIN_10_EXP);
+    else if (!strcmp(header, "time.h"))
+        (void)snprintf(generated, sizeof generated,
+                       PP_COMMON "#define time_t int\n#define clock_t int\n#define CLOCKS_PER_SEC %ld\n",
+                       (long)CLOCKS_PER_SEC);
+    else if (!strcmp(header, "errno.h"))
+        (void)snprintf(generated, sizeof generated,
+                       "#define EDOM %d\n#define ERANGE %d\n#define EILSEQ %d\n#define ENOENT %d\n"
+                       "#define EACCES %d\n#define EINVAL %d\n#define ENOMEM %d\n#define EEXIST %d\n"
+                       "#define EIO %d\n", EDOM, ERANGE, EILSEQ, ENOENT, EACCES, EINVAL, ENOMEM, EEXIST, EIO);
+    for (size_t i = 0; i < sizeof headers / sizeof headers[0]; ++i)
+        if (!strcmp(header, headers[i].name))
+            return copy(headers[i].body ? headers[i].body : generated,
+                        strlen(headers[i].body ? headers[i].body : generated));
+    return NULL;
+}
+
 static void include(Expansion *expansion, const char *source, Text *output, unsigned depth) {
     Text expanded = {0};
     Macro *disabled[PP_DEPTH] = {0};
@@ -404,21 +510,18 @@ static void include(Expansion *expansion, const char *source, Text *output, unsi
     char *header = copy(start, (size_t)(end - start));
     free(expanded.data);
     if (!header) { fail(expansion, "out of memory"); return; }
-    static const char *headers[] = {"stdio.h", "stdlib.h", "string.h", "math.h", "ctype.h", "stddef.h", "limits.h", "time.h", "errno.h"};
-    int builtin = 0;
-    for (size_t i = 0; i < sizeof headers / sizeof headers[0]; ++i) if (!strcmp(header, headers[i])) builtin = 1;
-    if (system && builtin) {
-        char constants[512];
-        (void)snprintf(constants, sizeof constants, "#define NULL 0\n#define EOF -1\n#define INT_MAX %d\n#define INT_MIN (-%d - 1)\n#define CHAR_BIT %d\n#define size_t int\n#define FILE void\n#define SEEK_SET 0\n#define SEEK_CUR 1\n#define SEEK_END 2\n#define RAND_MAX 32767\n", INT_MAX, INT_MAX, CHAR_BIT);
+    char *definitions = system ? header_definitions(header) : NULL;
+    if (system && !definitions) { fail(expansion, "standard header is not implemented"); free(header); return; }
+    if (definitions) {
         size_t line = expansion->line;
         Text declarations = {0};
-        (void)process(expansion, constants, &declarations, depth + 1);
+        (void)process(expansion, definitions, &declarations, depth + 1);
         free(declarations.data);
+        free(definitions);
         expansion->line = line;
         free(header);
         return;
     }
-    if (system) { fail(expansion, "standard header is not implemented"); free(header); return; }
     char filename[4096];
     const char *slash = strrchr(expansion->file, '/');
     size_t directory = slash ? (size_t)(slash - expansion->file + 1) : 0;
@@ -427,6 +530,8 @@ static void include(Expansion *expansion, const char *source, Text *output, unsi
     memcpy(filename, expansion->file, directory);
     strcpy(filename + directory, header);
     free(header);
+    for (size_t i = 0; i < expansion->preprocessor->once_count; ++i)
+        if (!strcmp(expansion->preprocessor->once[i], filename)) return;
     FILE *file = fopen(filename, "rb");
     if (!file) { fail(expansion, "could not open included file"); return; }
     Text content = {0};
@@ -506,7 +611,8 @@ static int process(Expansion *expansion, const char *source, Text *output, unsig
                 else if (length == 5 && !memcmp(cursor, "undef", 5)) undefine(expansion->preprocessor, body, (size_t)(name_end(body) - body));
                 else if (length == 7 && !memcmp(cursor, "include", 7)) include(expansion, body, output, depth);
                 else if (length == 5 && !memcmp(cursor, "error", 5)) fail(expansion, body);
-                else if (length == 6 && !memcmp(cursor, "pragma", 6)) fail(expansion, "pragma is not implemented; use include guards");
+                else if (length == 6 && !memcmp(cursor, "pragma", 6)) pragma(expansion, body);
+                else if (length == 4 && !memcmp(cursor, "line", 4)) line_directive(expansion, body);
                 else if (length) fail(expansion, "unsupported preprocessor directive");
             }
             emit(expansion, output, "\n", 1);
@@ -530,10 +636,31 @@ static int process(Expansion *expansion, const char *source, Text *output, unsig
     return !expansion->failed;
 }
 
+/* Defined once per session so that a program may still #undef or replace them. */
+static void predefine(Expansion *expansion) {
+    time_t now = time(NULL);
+    struct tm *local = localtime(&now);
+    char stamp[128] = "", definitions[768];
+    if (local) (void)strftime(stamp, sizeof stamp,
+                              "#define __DATE__ \"%b %e %Y\"\n#define __TIME__ \"%H:%M:%S\"\n", local);
+    (void)snprintf(definitions, sizeof definitions,
+                   "#define __STDC__ 1\n#define __STDC_VERSION__ 201710L\n#define __STDC_HOSTED__ 1\n"
+                   "#define __STDC_NO_VLA__ 1\n#define __STDC_NO_ATOMICS__ 1\n"
+                   "#define __STDC_NO_COMPLEX__ 1\n#define __STDC_NO_THREADS__ 1\n"
+                   "#define __CTERPRETER__ 1\n#define __CTERPRETER_VERSION__ \"%s\"\n%s",
+                   CT_VERSION, stamp);
+    Text discarded = {0};
+    expansion->preprocessor->initialized = 1;
+    (void)process(expansion, definitions, &discarded, 1);
+    free(discarded.data);
+    expansion->line = 1;
+}
+
 int preprocess(Preprocessor *preprocessor, const char *source, const char *filename, char **output, CtError *error) {
     Expansion expansion = {.preprocessor = preprocessor, .error = error, .file = filename, .line = 1};
     Text result = {0};
-    int ok = process(&expansion, source, &result, 0);
+    if (!preprocessor->initialized) predefine(&expansion);
+    int ok = !expansion.failed && process(&expansion, source, &result, 0);
     if (ok && !result.data) result.data = copy("", 0);
     if (ok && !result.data) { fail(&expansion, "out of memory"); ok = 0; }
     *output = ok ? result.data : NULL;

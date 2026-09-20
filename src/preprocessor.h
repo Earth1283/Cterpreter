@@ -12,7 +12,12 @@ struct Macro {
     Macro *next;
 };
 
-typedef struct { Macro *macros; } Preprocessor;
+typedef struct {
+    Macro *macros;
+    char **once;
+    size_t once_count, counter;
+    int initialized;
+} Preprocessor;
 
 int preprocess(Preprocessor *preprocessor, const char *source, const char *filename,
                char **output, CtError *error);
