@@ -1,4 +1,5 @@
 #include "lexer.h"
+#include "types.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -22,6 +23,23 @@ static void advance(Lexer *lexer) {
 static int suffix_ends(const char *cursor, const char *end, const char *allowed) {
     for (; cursor != end; ++cursor) if (!strchr(allowed, *cursor)) return 0;
     return 1;
+}
+
+/* C17 6.4.4.1: the literal takes the first type in its list that can hold it. */
+static CtType literal_type(unsigned long long value, int is_unsigned, int long_count, int is_octal_or_hex) {
+    static const CtType signed_first[] = {CT_INT, CT_LONG, CT_LLONG};
+    static const CtType unsigned_first[] = {CT_UINT, CT_ULONG, CT_ULLONG};
+    for (int width = long_count > 2 ? 2 : long_count; width < 3; ++width) {
+        if (!is_unsigned) {
+            CtType candidate = signed_first[width];
+            if (value <= (unsigned long long)type_maximum(candidate)) return candidate;
+        }
+        if (is_unsigned || is_octal_or_hex) {
+            CtType candidate = unsigned_first[width];
+            if (value <= type_mask(candidate)) return candidate;
+        }
+    }
+    return CT_VOID;
 }
 
 static Token bad(Lexer *lexer, Token token, const char *message) {
@@ -92,7 +110,11 @@ Token lexer_next(Lexer *lexer) {
             {"sizeof", TK_SIZEOF}, {"_Alignof", TK_ALIGNOF}, {"static", TK_STATIC},
             {"const", TK_CONST}, {"switch", TK_SWITCH}, {"case", TK_CASE},
             {"default", TK_DEFAULT}, {"goto", TK_GOTO}, {"typedef", TK_TYPEDEF}, {"enum", TK_ENUM},
-            {"_Generic", TK_GENERIC}, {"struct", TK_STRUCT}, {"union", TK_UNION}
+            {"_Generic", TK_GENERIC}, {"struct", TK_STRUCT}, {"union", TK_UNION},
+            {"signed", TK_SIGNED}, {"unsigned", TK_UNSIGNED}, {"short", TK_SHORT},
+            {"long", TK_LONG}, {"float", TK_FLOAT}, {"_Bool", TK_BOOL},
+            {"volatile", TK_VOLATILE}, {"restrict", TK_RESTRICT}, {"extern", TK_EXTERN},
+            {"register", TK_REGISTER}, {"inline", TK_INLINE}, {"auto", TK_AUTO}
         };
         for (size_t i = 0; i < sizeof keywords / sizeof keywords[0]; ++i)
             if (strlen(keywords[i].name) == token.length &&
@@ -119,14 +141,24 @@ Token lexer_next(Lexer *lexer) {
                 (hex && !memchr(token.start, 'p', token.length) && !memchr(token.start, 'P', token.length)))
                 return bad(lexer, token, "invalid or unsupported floating-point literal");
             if (errno == ERANGE || !isfinite(value)) return bad(lexer, token, "floating-point literal out of range");
+            if (memchr(end, 'l', (size_t)(lexer->cursor - end)) || memchr(end, 'L', (size_t)(lexer->cursor - end)))
+                return bad(lexer, token, "long double is not supported");
+            int single = end != lexer->cursor;
             token.kind = TK_REAL;
-            token.value = (CtValue){.type = CT_DOUBLE, .as.real = value};
+            token.value = (CtValue){.type = single ? CT_FLOAT : CT_DOUBLE,
+                                    .as.real = single ? (double)(float)value : value};
         } else {
-            long value = strtol(token.start, &end, 0);
+            unsigned long long value = strtoull(token.start, &end, 0);
             if (!suffix_ends(end, lexer->cursor, "uUlL")) return bad(lexer, token, "invalid or unsupported integer literal");
-            if (errno == ERANGE || value > INT_MAX) return bad(lexer, token, "integer literal exceeds supported int range");
+            if (errno == ERANGE) return bad(lexer, token, "integer literal exceeds unsigned long long");
+            int unsigned_suffix = 0, long_suffix = 0;
+            for (const char *cursor = end; cursor != lexer->cursor; ++cursor)
+                if (*cursor == 'u' || *cursor == 'U') unsigned_suffix = 1;
+                else ++long_suffix;
+            CtType type = literal_type(value, unsigned_suffix, long_suffix, hex || *token.start == '0');
+            if (type == CT_VOID) return bad(lexer, token, "no integer type can hold the literal");
             token.kind = TK_INTEGER;
-            token.value = (CtValue){.type = CT_INT, .as.integer = (int)value};
+            token.value = (CtValue){.type = type, .as.unsigned_integer = value};
         }
         return token;
     }

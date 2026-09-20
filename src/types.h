@@ -3,8 +3,12 @@
 
 #include "cterpreter.h"
 
+/* The scalar kinds are listed in the same order as the CT_* handles so that a
+ * basic type's handle is its kind. */
 typedef enum {
-    TY_INT, TY_DOUBLE, TY_CHAR, TY_VOID, TY_POINTER, TY_ARRAY, TY_STRUCT, TY_UNION, TY_FUNCTION
+    TY_BOOL, TY_CHAR, TY_SCHAR, TY_UCHAR, TY_SHORT, TY_USHORT, TY_INT, TY_UINT,
+    TY_LONG, TY_ULONG, TY_LLONG, TY_ULLONG, TY_FLOAT, TY_DOUBLE, TY_VOID,
+    TY_POINTER, TY_ARRAY, TY_STRUCT, TY_UNION, TY_FUNCTION
 } TypeKind;
 
 typedef struct {
@@ -18,6 +22,7 @@ typedef struct {
     TypeKind kind;
     CtType target;
     size_t count, size, align;
+    int is_signed, rank;
     char *tag;
     Member *members;
     size_t member_count;
@@ -50,14 +55,22 @@ static inline int type_is_aggregate(CtType type) {
     TypeKind kind = type_kind(type);
     return kind == TY_STRUCT || kind == TY_UNION;
 }
-static inline int type_is_integer(CtType type) {
+static inline int type_is_integer(CtType type) { return type_kind(type) <= TY_ULLONG; }
+static inline int type_is_real(CtType type) {
     TypeKind kind = type_kind(type);
-    return kind == TY_INT || kind == TY_CHAR;
+    return kind == TY_FLOAT || kind == TY_DOUBLE;
 }
-static inline int type_is_number(CtType type) {
-    TypeKind kind = type_kind(type);
-    return kind == TY_INT || kind == TY_CHAR || kind == TY_DOUBLE;
-}
+static inline int type_is_number(CtType type) { return type_kind(type) <= TY_DOUBLE; }
+static inline int type_is_signed(CtType type) { return type_info(type)->is_signed; }
+
+/* C17 6.3.1.1: anything narrower than int becomes int in an expression. */
+CtType type_promote(CtType type);
+/* C17 6.3.1.8: the type the two operands of an arithmetic operator share. */
+CtType type_common(CtType left, CtType right);
+/* The widest value the type can hold, for range checks and wrapping. */
+uint64_t type_mask(CtType type);
+int64_t type_minimum(CtType type);
+int64_t type_maximum(CtType type);
 /* Objects that a CtValue carries directly rather than by address. */
 static inline int type_is_scalar(CtType type) { return type_is_number(type) || type_is_pointer(type); }
 

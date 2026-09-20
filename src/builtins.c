@@ -1,6 +1,7 @@
 #include "runtime.h"
 
 #include <ctype.h>
+#include <stdint.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -12,13 +13,15 @@
 #define CHAR_POINTER type_pointer(CT_CHAR)
 #define VOID_POINTER type_pointer(CT_VOID)
 
-typedef enum { RT_INT, RT_DOUBLE, RT_VOID, RT_CHAR_POINTER, RT_VOID_POINTER } ReturnKind;
+typedef enum { RT_INT, RT_LONG, RT_ULONG, RT_DOUBLE, RT_VOID, RT_CHAR_POINTER, RT_VOID_POINTER } ReturnKind;
 
 static CtValue integer(int value) { return (CtValue){.type = CT_INT, .as.integer = value}; }
 static int named(Token token, const char *name) { return strlen(name) == token.length && !memcmp(token.start, name, token.length); }
 
 static CtType return_type(ReturnKind kind) {
     switch (kind) {
+        case RT_LONG: return CT_LONG;
+        case RT_ULONG: return CT_ULONG;
         case RT_DOUBLE: return CT_DOUBLE;
         case RT_VOID: return CT_VOID;
         case RT_CHAR_POINTER: return type_pointer(CT_CHAR);
@@ -37,20 +40,20 @@ static const struct { const char *name; ReturnKind type; unsigned char arity; } 
     {"fopen", RT_VOID_POINTER, 2}, {"fclose", RT_INT, 1}, {"fflush", RT_INT, 1}, {"fgetc", RT_INT, 1},
     {"fputc", RT_INT, 2}, {"fputs", RT_INT, 2}, {"fgets", RT_CHAR_POINTER, 3},
     {"getc", RT_INT, 1}, {"putc", RT_INT, 2}, {"ungetc", RT_INT, 2},
-    {"fread", RT_INT, 4}, {"fwrite", RT_INT, 4}, {"fseek", RT_INT, 3}, {"ftell", RT_INT, 1},
+    {"fread", RT_ULONG, 4}, {"fwrite", RT_ULONG, 4}, {"fseek", RT_INT, 3}, {"ftell", RT_LONG, 1},
     {"rewind", RT_VOID, 1}, {"feof", RT_INT, 1}, {"ferror", RT_INT, 1}, {"clearerr", RT_VOID, 1},
     {"remove", RT_INT, 1}, {"rename", RT_INT, 2}, {"getenv", RT_CHAR_POINTER, 1}, {"strerror", RT_CHAR_POINTER, 1},
     {"malloc", RT_VOID_POINTER, 1}, {"calloc", RT_VOID_POINTER, 2}, {"realloc", RT_VOID_POINTER, 2},
     {"free", RT_VOID, 1},
-    {"strlen", RT_INT, 1}, {"strcmp", RT_INT, 2}, {"strncmp", RT_INT, 3}, {"strcpy", RT_CHAR_POINTER, 2},
+    {"strlen", RT_ULONG, 1}, {"strcmp", RT_INT, 2}, {"strncmp", RT_INT, 3}, {"strcpy", RT_CHAR_POINTER, 2},
     {"strncpy", RT_CHAR_POINTER, 3}, {"strcat", RT_CHAR_POINTER, 2}, {"strncat", RT_CHAR_POINTER, 3},
     {"strchr", RT_CHAR_POINTER, 2}, {"strrchr", RT_CHAR_POINTER, 2}, {"strstr", RT_CHAR_POINTER, 2},
-    {"strspn", RT_INT, 2}, {"strcspn", RT_INT, 2}, {"strpbrk", RT_CHAR_POINTER, 2}, {"strtok", RT_CHAR_POINTER, 2},
+    {"strspn", RT_ULONG, 2}, {"strcspn", RT_ULONG, 2}, {"strpbrk", RT_CHAR_POINTER, 2}, {"strtok", RT_CHAR_POINTER, 2},
     {"memcpy", RT_VOID_POINTER, 3}, {"memmove", RT_VOID_POINTER, 3}, {"memset", RT_VOID_POINTER, 3},
     {"memcmp", RT_INT, 3}, {"memchr", RT_VOID_POINTER, 3},
-    {"atoi", RT_INT, 1}, {"atol", RT_INT, 1}, {"atof", RT_DOUBLE, 1},
-    {"strtol", RT_INT, 3}, {"strtod", RT_DOUBLE, 2},
-    {"abs", RT_INT, 1}, {"labs", RT_INT, 1}, {"rand", RT_INT, 0}, {"srand", RT_VOID, 1},
+    {"atoi", RT_INT, 1}, {"atol", RT_LONG, 1}, {"atof", RT_DOUBLE, 1},
+    {"strtol", RT_LONG, 3}, {"strtod", RT_DOUBLE, 2},
+    {"abs", RT_INT, 1}, {"labs", RT_LONG, 1}, {"rand", RT_INT, 0}, {"srand", RT_VOID, 1},
     {"qsort", RT_VOID, 4}, {"bsearch", RT_VOID_POINTER, 5}, {"abort", RT_VOID, 0}, {"exit", RT_VOID, 1},
     {"sqrt", RT_DOUBLE, 1}, {"cbrt", RT_DOUBLE, 1}, {"pow", RT_DOUBLE, 2}, {"hypot", RT_DOUBLE, 2},
     {"sin", RT_DOUBLE, 1}, {"cos", RT_DOUBLE, 1}, {"tan", RT_DOUBLE, 1},
@@ -62,7 +65,7 @@ static const struct { const char *name; ReturnKind type; unsigned char arity; } 
     {"floor", RT_DOUBLE, 1}, {"ceil", RT_DOUBLE, 1}, {"round", RT_DOUBLE, 1}, {"trunc", RT_DOUBLE, 1},
     {"fabs", RT_DOUBLE, 1}, {"fmod", RT_DOUBLE, 2}, {"fmin", RT_DOUBLE, 2}, {"fmax", RT_DOUBLE, 2},
     {"fdim", RT_DOUBLE, 2}, {"copysign", RT_DOUBLE, 2},
-    {"time", RT_INT, 1}, {"difftime", RT_DOUBLE, 2}, {"clock", RT_INT, 0},
+    {"time", RT_LONG, 1}, {"difftime", RT_DOUBLE, 2}, {"clock", RT_LONG, 0},
     {"isdigit", RT_INT, 1}, {"isalpha", RT_INT, 1}, {"isalnum", RT_INT, 1}, {"isspace", RT_INT, 1},
     {"isupper", RT_INT, 1}, {"islower", RT_INT, 1}, {"ispunct", RT_INT, 1}, {"isprint", RT_INT, 1},
     {"isgraph", RT_INT, 1}, {"iscntrl", RT_INT, 1}, {"isxdigit", RT_INT, 1}, {"isblank", RT_INT, 1},
@@ -87,17 +90,48 @@ static int require_count(CtInterpreter *interpreter, Token name, size_t count) {
     return 0;
 }
 
-static int number(CtInterpreter *interpreter, Token name, CtValue value) {
-    if (value.type != CT_INT && value.type != CT_CHAR) {
+static int64_t number(CtInterpreter *interpreter, Token name, CtValue value) {
+    if (!type_is_integer(value.type)) {
         (void)runtime_error(interpreter, name, "library argument requires an integer");
         return 0;
     }
-    return value.as.integer;
+    return type_is_signed(value.type) ? value.as.integer : (int64_t)value.as.unsigned_integer;
+}
+
+/* Reinterprets an integer as the type a conversion specifier implies. */
+static int64_t narrow(CtValue value, CtType type, uint64_t *bits) {
+    uint64_t masked = value.as.unsigned_integer & type_mask(type);
+    *bits = masked;
+    if (type_is_signed(type) && masked > (uint64_t)type_maximum(type))
+        return (int64_t)(masked - type_mask(type) - 1);
+    return (int64_t)masked;
+}
+
+static CtValue integer_of(CtType type, int64_t value) {
+    CtValue result = {.type = type};
+    uint64_t bits = (uint64_t)value & type_mask(type);
+    if (type_is_signed(type) && bits > (uint64_t)type_maximum(type))
+        result.as.integer = (int64_t)(bits - type_mask(type) - 1);
+    else result.as.unsigned_integer = bits;
+    return result;
+}
+
+static int small(CtInterpreter *interpreter, Token name, CtValue value) {
+    int64_t result = number(interpreter, name, value);
+    if (result < INT_MIN || result > INT_MAX) {
+        (void)runtime_error(interpreter, name, "library argument does not fit in an int");
+        return 0;
+    }
+    return (int)result;
 }
 
 static double real_number(CtInterpreter *interpreter, Token name, CtValue value) {
-    if (value.type == CT_DOUBLE) return value.as.real;
-    return (double)number(interpreter, name, value);
+    if (type_is_real(value.type)) return value.as.real;
+    if (!type_is_integer(value.type)) {
+        (void)runtime_error(interpreter, name, "library argument requires a number");
+        return 0.0;
+    }
+    return type_is_signed(value.type) ? (double)value.as.integer : (double)value.as.unsigned_integer;
 }
 
 static uint64_t pointer(CtInterpreter *interpreter, Token name, CtValue value) {
@@ -116,9 +150,12 @@ static char *string(CtInterpreter *interpreter, Token name, CtValue value) {
 }
 
 static size_t size_argument(CtInterpreter *interpreter, Token name, CtValue value) {
-    int size = number(interpreter, name, value);
-    if (size < 0) (void)runtime_error(interpreter, name, "size cannot be negative");
-    return size < 0 ? 0 : (size_t)size;
+    int64_t size = number(interpreter, name, value);
+    if (size < 0 || (uint64_t)size > CT_SOURCE_LIMIT * 64u) {
+        (void)runtime_error(interpreter, name, "size is negative or beyond the interpreter's memory limit");
+        return 0;
+    }
+    return (size_t)size;
 }
 
 static void *access_memory(CtInterpreter *interpreter, Token name, uint64_t address, size_t size, int write) {
@@ -189,7 +226,7 @@ static int get_errno(CtInterpreter *interpreter) {
     uint64_t address = errno_object(interpreter);
     if (!address) return 0;
     CtValue value = memory_read(&interpreter->memory, address, CT_INT);
-    return interpreter->memory.error ? 0 : value.as.integer;
+    return interpreter->memory.error ? 0 : (int)value.as.integer;
 }
 
 int builtin_value(CtInterpreter *interpreter, Token name, CtValue *value) {
@@ -214,6 +251,18 @@ void builtin_cleanup(CtInterpreter *interpreter) {
 }
 
 typedef struct { char *data; size_t size, capacity; } Output;
+
+/* The conversion and its length modifier name the C type the argument stands for. */
+static CtType conversion_type(char conversion, char length, int doubled) {
+    int is_signed = conversion == 'd' || conversion == 'i';
+    switch (length) {
+        case 'h': return doubled ? (is_signed ? CT_SCHAR : CT_UCHAR) : (is_signed ? CT_SHORT : CT_USHORT);
+        case 'l': return doubled ? (is_signed ? CT_LLONG : CT_ULLONG) : (is_signed ? CT_LONG : CT_ULONG);
+        case 'j': return is_signed ? CT_LLONG : CT_ULLONG;
+        case 'z': case 't': return is_signed ? CT_LONG : CT_ULONG;
+        default: return is_signed ? CT_INT : CT_UINT;
+    }
+}
 
 static int append(Output *output, const char *data, size_t length) {
     if (length > CT_SOURCE_LIMIT || output->size > CT_SOURCE_LIMIT - length) return 0;
@@ -266,7 +315,7 @@ static CtValue formatted(CtInterpreter *interpreter, Token name, const CtValue *
         int width = 0;
         if (format[i] == '*') {
             if (argument >= count) { (void)runtime_error(interpreter, name, "missing printf width"); break; }
-            width = number(interpreter, name, args[argument++]);
+            width = small(interpreter, name, args[argument++]);
             ++i;
             if (width < 0) { spec[used++] = '-'; if (width == INT_MIN) width = INT_MAX; else width = -width; }
         } else while (isdigit((unsigned char)format[i])) {
@@ -280,7 +329,7 @@ static CtValue formatted(CtInterpreter *interpreter, Token name, const CtValue *
             int precision = 0;
             if (format[i] == '*') {
                 if (argument >= count) { (void)runtime_error(interpreter, name, "missing printf precision"); break; }
-                precision = number(interpreter, name, args[argument++]);
+                precision = small(interpreter, name, args[argument++]);
                 ++i;
             } else while (isdigit((unsigned char)format[i])) {
                 if (precision > (int)CT_SOURCE_LIMIT / 10) { precision = (int)CT_SOURCE_LIMIT + 1; break; }
@@ -309,21 +358,19 @@ static CtValue formatted(CtInterpreter *interpreter, Token name, const CtValue *
             continue;
         }
         char *text = NULL;
-        int signed_value = 0;
-        unsigned int unsigned_value = 0;
+        int64_t signed_value = 0;
+        uint64_t unsigned_value = 0;
         char pointer_text[32];
         double real_value = 0;
         uint64_t address = 0;
         int integer_conversion = strchr("diuoxX", conversion) != NULL;
-        if (integer_conversion || conversion == 'c') signed_value = number(interpreter, name, value);
-        else if (conversion == 's') text = string(interpreter, name, value);
+        if (integer_conversion || conversion == 'c') {
+            if (!type_is_integer(value.type)) (void)runtime_error(interpreter, name, "conversion requires an integer");
+            else signed_value = narrow(value, conversion == 'c' ? CT_INT : conversion_type(conversion, length, doubled),
+                                       &unsigned_value);
+        } else if (conversion == 's') text = string(interpreter, name, value);
         else if (conversion == 'p') address = pointer(interpreter, name, value);
         else real_value = real_number(interpreter, name, value);
-        unsigned_value = (unsigned int)signed_value;
-        if (length == 'h' && integer_conversion) {
-            unsigned_value = doubled ? (unsigned char)signed_value : (unsigned short)signed_value;
-            signed_value = doubled ? (signed char)signed_value : (short)signed_value;
-        }
         if (length == 'L' || ((conversion == 's' || conversion == 'c') && length))
             (void)runtime_error(interpreter, name, "wide strings and long double formats are unsupported");
         if (interpreter->failed) break;
@@ -337,7 +384,7 @@ static CtValue formatted(CtInterpreter *interpreter, Token name, const CtValue *
         spec[used] = '\0';
         int required;
         if (conversion == 's') required = snprintf(NULL, 0, spec, text);
-        else if (conversion == 'c') required = snprintf(NULL, 0, spec, signed_value);
+        else if (conversion == 'c') required = snprintf(NULL, 0, spec, (int)signed_value);
         else if (conversion == 'd' || conversion == 'i') required = snprintf(NULL, 0, spec, (intmax_t)signed_value);
         else if (integer_conversion) required = snprintf(NULL, 0, spec, (uintmax_t)unsigned_value);
         else required = snprintf(NULL, 0, spec, real_value);
@@ -345,7 +392,7 @@ static CtValue formatted(CtInterpreter *interpreter, Token name, const CtValue *
         char *piece = malloc((size_t)required + 1);
         if (!piece) { (void)runtime_error(interpreter, name, "out of memory"); break; }
         if (conversion == 's') (void)snprintf(piece, (size_t)required + 1, spec, text);
-        else if (conversion == 'c') (void)snprintf(piece, (size_t)required + 1, spec, signed_value);
+        else if (conversion == 'c') (void)snprintf(piece, (size_t)required + 1, spec, (int)signed_value);
         else if (conversion == 'd' || conversion == 'i') (void)snprintf(piece, (size_t)required + 1, spec, (intmax_t)signed_value);
         else if (integer_conversion) (void)snprintf(piece, (size_t)required + 1, spec, (uintmax_t)unsigned_value);
         else (void)snprintf(piece, (size_t)required + 1, spec, real_value);
@@ -429,14 +476,24 @@ static CtValue scanned(CtInterpreter *interpreter, Token name, const CtValue *ar
             width = width * 10 + (size_t)(format[i++] - '0');
         }
         if (width > CT_SOURCE_LIMIT) return runtime_error(interpreter, name, "scanf width exceeds limit");
-        int long_format = format[i] == 'l';
-        if (long_format) ++i;
+        char modifier = 0;
+        int doubled = 0;
+        if (format[i] && strchr("hljzt", format[i])) {
+            modifier = format[i++];
+            if ((modifier == 'h' || modifier == 'l') && format[i] == modifier) { doubled = 1; ++i; }
+        }
         char conversion = format[i];
         if (!conversion || !strchr("diuoxXfFeEgGscn", conversion)) return runtime_error(interpreter, name, "unsupported scanf conversion");
         int floating = strchr("fFeEgG", conversion) != NULL;
-        if ((floating && !long_format) || (!floating && long_format))
-            return runtime_error(interpreter, name, "scanf supports int, char, and %lf double destinations");
-        CtType type = floating ? CT_DOUBLE : conversion == 's' || conversion == 'c' ? CT_CHAR : CT_INT;
+        CtType type;
+        if (conversion == 's' || conversion == 'c') {
+            if (modifier) return runtime_error(interpreter, name, "wide scanf destinations are unsupported");
+            type = CT_CHAR;
+        } else if (floating) {
+            if (modifier == 'l' && !doubled) type = CT_DOUBLE;
+            else if (!modifier) type = CT_FLOAT;
+            else return runtime_error(interpreter, name, "scanf supports float and %lf double destinations");
+        } else type = conversion_type(conversion == 'i' ? 'd' : conversion, modifier, doubled);
         uint64_t destination = 0;
         if (!suppress) {
             if (argument >= count) return runtime_error(interpreter, name, "not enough scanf destinations");
@@ -445,7 +502,7 @@ static CtValue scanned(CtInterpreter *interpreter, Token name, const CtValue *ar
             destination = args[argument++].as.address;
         }
         if (conversion == 'n') {
-            if (!suppress && !memory_write(&interpreter->memory, destination, integer((int)input.position)))
+            if (!suppress && !memory_write(&interpreter->memory, destination, integer_of(type, (int64_t)input.position)))
                 return runtime_error(interpreter, name, interpreter->memory.error);
             continue;
         }
@@ -500,12 +557,20 @@ static CtValue scanned(CtInterpreter *interpreter, Token name, const CtValue *ar
             char *end = NULL;
             CtValue value;
             errno = 0;
-            if (floating) value = (CtValue){.type = CT_DOUBLE, .as.real = strtod(text, &end)};
-            else {
+            if (floating) {
+                double parsed = strtod(text, &end);
+                value = (CtValue){.type = type, .as.real = type == CT_FLOAT ? (double)(float)parsed : parsed};
+            } else {
                 int base = conversion == 'i' ? 0 : conversion == 'o' ? 8 : conversion == 'x' || conversion == 'X' ? 16 : 10;
-                long number_value = strtol(text, &end, base);
-                if (number_value < INT_MIN || number_value > INT_MAX) errno = ERANGE;
-                value = integer((int)number_value);
+                if (type_is_signed(type)) {
+                    long long parsed = strtoll(text, &end, base);
+                    if (parsed < type_minimum(type) || parsed > type_maximum(type)) errno = ERANGE;
+                    value = integer_of(type, parsed);
+                } else {
+                    unsigned long long parsed = strtoull(text, &end, base);
+                    if (parsed > type_mask(type)) errno = ERANGE;
+                    value = integer_of(type, (int64_t)parsed);
+                }
             }
             size_t consumed = (size_t)(end - text);
             while (length > consumed) input_unget(&input, (unsigned char)text[--length]);
@@ -536,7 +601,7 @@ static CtValue file_call(CtInterpreter *interpreter, Token name, const CtValue *
     }
     if (named(name, "remove") || named(name, "rename") || named(name, "getenv") || named(name, "strerror")) {
         if (named(name, "strerror")) {
-            int code = number(interpreter, name, args[0]);
+            int code = small(interpreter, name, args[0]);
             return interpreter->failed ? integer(0) : copy_string(interpreter, name, strerror(code));
         }
         char *path = string(interpreter, name, args[0]);
@@ -564,17 +629,17 @@ static CtValue file_call(CtInterpreter *interpreter, Token name, const CtValue *
     } else if (named(name, "fflush")) result = fflush(stream);
     else if (named(name, "fgetc") || named(name, "getc")) result = fgetc(stream);
     else if (named(name, "ungetc")) {
-        int character = number(interpreter, name, args[0]);
+        int character = small(interpreter, name, args[0]);
         if (!interpreter->failed) result = ungetc(character, stream);
     } else if (named(name, "fputc") || named(name, "putc")) {
-        int character = number(interpreter, name, args[0]);
+        int character = small(interpreter, name, args[0]);
         if (!interpreter->failed) result = fputc(character, stream);
     } else if (named(name, "fputs")) {
         char *text = string(interpreter, name, args[0]);
         if (text) result = fputs(text, stream);
     } else if (named(name, "fgets")) {
         uint64_t address = pointer(interpreter, name, args[0]);
-        int size = number(interpreter, name, args[1]);
+        int size = small(interpreter, name, args[1]);
         if (size <= 0) return runtime_error(interpreter, name, "fgets size must be positive");
         char *target = access_memory(interpreter, name, address, (size_t)size, 2);
         if (!target) return integer(0);
@@ -597,16 +662,17 @@ static CtValue file_call(CtInterpreter *interpreter, Token name, const CtValue *
             (void)memory_access(&interpreter->memory, address, bytes, 1);
             transferred = bytes / size;
         } else transferred = fwrite(data, size, elements, stream);
-        result = (int)transferred;
+        set_errno(interpreter, errno);
+        return integer_of(CT_ULONG, (int64_t)transferred);
     } else if (named(name, "fseek")) {
-        int offset = number(interpreter, name, args[1]);
-        int origin = number(interpreter, name, args[2]);
+        int offset = small(interpreter, name, args[1]);
+        int origin = small(interpreter, name, args[2]);
         if (origin != SEEK_SET && origin != SEEK_CUR && origin != SEEK_END) return runtime_error(interpreter, name, "invalid seek origin");
         if (!interpreter->failed) result = fseek(stream, offset, origin);
     } else if (named(name, "ftell")) {
         long position = ftell(stream);
-        if (position > INT_MAX) return runtime_error(interpreter, name, "file position exceeds supported int range");
-        result = (int)position;
+        set_errno(interpreter, errno);
+        return integer_of(CT_LONG, position);
     } else if (named(name, "rewind")) rewind(stream);
     else if (named(name, "feof")) result = feof(stream);
     else if (named(name, "ferror")) result = ferror(stream);
@@ -670,7 +736,7 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
         named(name, "getc") || named(name, "putc") || named(name, "ungetc")) return file_call(interpreter, name, args, count);
     if (!require_count(interpreter, name, count)) return integer(0);
     if (named(name, "getchar")) return integer(fgetc(interpreter->input));
-    if (named(name, "clock")) return integer((int)clock());
+    if (named(name, "clock")) return integer_of(CT_LONG, (int64_t)clock());
     if (named(name, "rand")) {
         interpreter->random_state = interpreter->random_state * 1103515245u + 12345u;
         return integer((int)((interpreter->random_state / 65536u) % 32768u));
@@ -685,7 +751,7 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
         return integer(result < 0 || fputc('\n', interpreter->output) == EOF ? EOF : 0);
     }
     if (named(name, "putchar")) {
-        int character = number(interpreter, name, args[0]);
+        int character = small(interpreter, name, args[0]);
         return integer(interpreter->failed ? EOF : fputc(character, interpreter->output));
     }
     if (named(name, "malloc") || named(name, "calloc") || named(name, "realloc")) {
@@ -732,12 +798,14 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
         char *a = copying ? NULL : string(interpreter, name, args[0]);
         char *b = count > 1 && !character_argument ? string(interpreter, name, args[1]) : NULL;
         if (interpreter->failed) return integer(0);
-        if (named(name, "strlen")) return integer((int)strlen(a));
+        if (named(name, "strlen")) return integer_of(CT_ULONG, (int64_t)strlen(a));
         if (named(name, "atoi") || named(name, "atol")) {
             errno = 0;
             long value = strtol(a, NULL, 10);
-            if (errno == ERANGE || value < INT_MIN || value > INT_MAX) return runtime_error(interpreter, name, "atoi result is out of range");
-            return integer((int)value);
+            int wide = named(name, "atol");
+            if (errno == ERANGE || (!wide && (value < INT_MIN || value > INT_MAX)))
+                return runtime_error(interpreter, name, "the parsed value is out of range");
+            return integer_of(wide ? CT_LONG : CT_INT, value);
         }
         if (named(name, "atof")) {
             errno = 0;
@@ -750,10 +818,10 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
             size_t n = size_argument(interpreter, name, args[2]);
             return interpreter->failed ? integer(0) : integer(strncmp(a, b, n));
         }
-        if (named(name, "strspn")) return integer((int)strspn(a, b));
-        if (named(name, "strcspn")) return integer((int)strcspn(a, b));
+        if (named(name, "strspn")) return integer_of(CT_ULONG, (int64_t)strspn(a, b));
+        if (named(name, "strcspn")) return integer_of(CT_ULONG, (int64_t)strcspn(a, b));
         if (named(name, "strchr") || named(name, "strrchr") || named(name, "strstr") || named(name, "strpbrk")) {
-            int character = named(name, "strstr") || named(name, "strpbrk") ? 0 : number(interpreter, name, args[1]);
+            int character = named(name, "strstr") || named(name, "strpbrk") ? 0 : small(interpreter, name, args[1]);
             if (interpreter->failed) return integer(0);
             char *found = named(name, "strchr") ? strchr(a, character)
                         : named(name, "strrchr") ? strrchr(a, character)
@@ -782,7 +850,7 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
     }
     if (named(name, "memchr")) {
         uint64_t address = pointer(interpreter, name, args[0]);
-        int character = number(interpreter, name, args[1]);
+        int character = small(interpreter, name, args[1]);
         size_t bytes = size_argument(interpreter, name, args[2]);
         void *data = access_memory(interpreter, name, address, bytes, 0);
         if (!data) return integer(0);
@@ -793,7 +861,7 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
         uint64_t destination = pointer(interpreter, name, args[0]);
         size_t bytes = size_argument(interpreter, name, args[2]);
         int setting = named(name, "memset"), comparing = named(name, "memcmp");
-        int character = setting ? number(interpreter, name, args[1]) : 0;
+        int character = setting ? small(interpreter, name, args[1]) : 0;
         uint64_t source = setting ? 0 : pointer(interpreter, name, args[1]);
         void *from = setting ? NULL : access_memory(interpreter, name, source, bytes, 0);
         void *to = access_memory(interpreter, name, destination, bytes, !comparing);
@@ -812,17 +880,17 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
     }
     if (named(name, "time")) {
         time_t now = time(NULL);
-        if (now == (time_t)-1 || (double)now > (double)INT_MAX)
-            return runtime_error(interpreter, name, "the clock is outside the supported int range");
+        if (now == (time_t)-1) return runtime_error(interpreter, name, "the clock is unavailable");
+        CtValue seconds = integer_of(CT_LONG, (int64_t)now);
         uint64_t destination = pointer(interpreter, name, args[0]);
-        if (destination && !memory_write(&interpreter->memory, destination, integer((int)now)))
+        if (destination && !memory_write(&interpreter->memory, destination, seconds))
             return runtime_error(interpreter, name, interpreter->memory.error);
-        return integer((int)now);
+        return seconds;
     }
     if (named(name, "__assert_fail")) {
         char *expression = string(interpreter, name, args[0]);
         char *file = string(interpreter, name, args[1]);
-        int line = number(interpreter, name, args[2]);
+        int line = small(interpreter, name, args[2]);
         if (interpreter->failed) return integer(0);
         char message[192];
         (void)snprintf(message, sizeof message, "assertion failed: %s (%s:%d)", expression, file, line);
@@ -830,7 +898,7 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
     }
     if (named(name, "strtol") || named(name, "strtod")) {
         char *text = string(interpreter, name, args[0]);
-        int base = named(name, "strtol") ? number(interpreter, name, args[2]) : 0;
+        int base = named(name, "strtol") ? small(interpreter, name, args[2]) : 0;
         if (interpreter->failed) return integer(0);
         if (named(name, "strtol") && base != 0 && (base < 2 || base > 36))
             return runtime_error(interpreter, name, "strtol requires a base of 0 or 2 through 36");
@@ -848,9 +916,7 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
                 return runtime_error(interpreter, name, interpreter->memory.error);
         }
         if (named(name, "strtod")) return (CtValue){.type = CT_DOUBLE, .as.real = real_result};
-        if (integer_result < INT_MIN || integer_result > INT_MAX)
-            return runtime_error(interpreter, name, "strtol result is outside the supported int range");
-        return integer((int)integer_result);
+        return integer_of(CT_LONG, integer_result);
     }
     if (named(name, "strtok")) {
         char *separators = string(interpreter, name, args[1]);
@@ -914,15 +980,21 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
         return (CtValue){.type = CT_VOID};
     }
     if (named(name, "exit") || named(name, "srand") || named(name, "abs") || named(name, "labs")) {
-        int value = number(interpreter, name, args[0]);
+        if (named(name, "labs")) {
+            int64_t wide = number(interpreter, name, args[0]);
+            if (interpreter->failed) return integer(0);
+            if (wide == INT64_MIN) return runtime_error(interpreter, name, "labs result overflows long");
+            return integer_of(CT_LONG, wide < 0 ? -wide : wide);
+        }
+        int value = small(interpreter, name, args[0]);
         if (interpreter->failed) return integer(0);
         if (named(name, "exit")) { interpreter->exit_requested = 1; interpreter->exit_status = value; return (CtValue){.type = CT_VOID}; }
         if (named(name, "srand")) { interpreter->random_state = (unsigned)value; return (CtValue){.type = CT_VOID}; }
         if (value == INT_MIN) return runtime_error(interpreter, name, "abs result overflows int");
-        return integer(abs(value));
+        return integer_of(named(name, "labs") ? CT_LONG : CT_INT, abs(value));
     }
     if ((name.length >= 2 && !memcmp(name.start, "is", 2)) || named(name, "toupper") || named(name, "tolower")) {
-        int value = number(interpreter, name, args[0]);
+        int value = small(interpreter, name, args[0]);
         if (value != EOF && (value < 0 || value > UCHAR_MAX)) return runtime_error(interpreter, name, "ctype requires an unsigned char or EOF");
         if (interpreter->failed) return integer(0);
         if (named(name, "isdigit")) return integer(isdigit(value));

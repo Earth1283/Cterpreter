@@ -1,12 +1,14 @@
 #include "parser.h"
 
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define TAG_CONSTANT 4
 #define SUFFIX_LIMIT 8
+#define TYPE_LIMIT 4096
 
 typedef struct Alias Alias;
 struct Alias { Node *node; unsigned scope; Alias *next; };
@@ -102,6 +104,7 @@ static Node *statement(Parser *parser, int top_level);
 static Node *initializer(Parser *parser);
 static CtType type_specifier(Parser *parser, int *is_static, int *is_const, Node ***tail);
 static CtType declarator(Parser *parser, CtType base, Token *name, Node **parameters, int *variadic);
+static int is_qualifier(int kind);
 
 static int enter(Parser *parser) {
     if (++parser->depth <= 128) return 1;
@@ -159,19 +162,24 @@ static Node *declare_tag(Parser *parser, Token tag, CtType type, int tag_kind) {
 
 static int begins_type(Parser *parser, Token token) {
     switch (token.kind) {
-        case TK_INT: case TK_DOUBLE: case TK_CHAR: case TK_VOID: case TK_CONST:
-        case TK_STATIC: case TK_TYPEDEF: case TK_ENUM: case TK_STRUCT: case TK_UNION: return 1;
+        case TK_INT: case TK_DOUBLE: case TK_CHAR: case TK_VOID: case TK_CONST: case TK_STATIC:
+        case TK_TYPEDEF: case TK_ENUM: case TK_STRUCT: case TK_UNION: case TK_SIGNED:
+        case TK_UNSIGNED: case TK_SHORT: case TK_LONG: case TK_FLOAT: case TK_BOOL:
+        case TK_VOLATILE: case TK_RESTRICT: case TK_EXTERN: case TK_REGISTER:
+        case TK_INLINE: case TK_AUTO: return 1;
         case TK_NAME: return find_alias(parser, token, TAG_NAME, 0) != NULL;
         default: return 0;
     }
 }
 
-static int constant_value(Parser *parser, Node *source, int *result) {
+/* Folds the constant expressions the language needs before execution: array
+ * bounds, enumerator values and array designators. Works in long long. */
+static int constant_value(Parser *parser, Node *source, int64_t *result) {
     if (!source) return 0;
-    int left = 0, right = 0;
+    int64_t left = 0, right = 0;
     switch (source->kind) {
         case N_VALUE:
-            if (source->token.value.type == CT_DOUBLE) return 0;
+            if (!type_is_integer(source->token.value.type)) return 0;
             *result = source->token.value.as.integer;
             return 1;
         case N_NAME: {
@@ -183,26 +191,30 @@ static int constant_value(Parser *parser, Node *source, int *result) {
         case N_SIZEOF: case N_ALIGNOF: {
             if (source->left) return 0;
             size_t size = source->kind == N_SIZEOF ? ct_type_size(source->type) : ct_type_align(source->type);
-            if (!size || size > INT_MAX) return 0;
-            *result = (int)size;
+            if (!size || size > INT64_MAX) return 0;
+            *result = (int64_t)size;
             return 1;
         }
         case N_CAST:
-            if (source->type != CT_INT && source->type != CT_CHAR) return 0;
+            if (!type_is_integer(source->type)) return 0;
             if (!constant_value(parser, source->left, result)) return 0;
-            if (source->type == CT_CHAR) *result = (char)*result;
+            *result = type_is_signed(source->type)
+                ? (int64_t)((uint64_t)*result & type_mask(source->type))
+                : (int64_t)((uint64_t)*result & type_mask(source->type));
+            if (type_is_signed(source->type) && *result > type_maximum(source->type))
+                *result -= (int64_t)type_mask(source->type) + 1;
             return 1;
         case N_UNARY:
             if (!constant_value(parser, source->left, &left)) return 0;
             switch (source->token.kind) {
                 case '+': *result = left; return 1;
-                case '-': if (left == INT_MIN) return 0; *result = -left; return 1;
+                case '-': if (left == INT64_MIN) return 0; *result = -left; return 1;
                 case '~': *result = ~left; return 1;
                 case '!': *result = !left; return 1;
                 default: return 0;
             }
         case N_CONDITIONAL: {
-            int condition = 0;
+            int64_t condition = 0;
             if (!constant_value(parser, source->left, &condition)) return 0;
             return constant_value(parser, condition ? source->right : source->third, result);
         }
@@ -213,35 +225,33 @@ static int constant_value(Parser *parser, Node *source, int *result) {
             if (kind == TK_AND && !left) { *result = 0; return 1; }
             if (kind == TK_OR && left) { *result = 1; return 1; }
             if (!constant_value(parser, source->right, &right)) return 0;
-            int64_t value;
+            /* Anything that could overflow a long long is simply not folded. */
+            if (left > INT32_MAX || left < INT32_MIN || right > INT32_MAX || right < INT32_MIN) return 0;
             switch (kind) {
-                case '+': value = (int64_t)left + right; break;
-                case '-': value = (int64_t)left - right; break;
-                case '*': value = (int64_t)left * right; break;
+                case '+': *result = left + right; return 1;
+                case '-': *result = left - right; return 1;
+                case '*': *result = left * right; return 1;
                 case '/': case '%':
-                    if (!right || (left == INT_MIN && right == -1)) return 0;
-                    value = kind == '/' ? left / right : left % right;
-                    break;
-                case '&': value = left & right; break;
-                case '|': value = left | right; break;
-                case '^': value = left ^ right; break;
+                    if (!right) return 0;
+                    *result = kind == '/' ? left / right : left % right;
+                    return 1;
+                case '&': *result = left & right; return 1;
+                case '|': *result = left | right; return 1;
+                case '^': *result = left ^ right; return 1;
                 case TK_SHL: case TK_SHR:
-                    if (right < 0 || right >= (int)(sizeof(int) * CHAR_BIT) || (kind == TK_SHL && left < 0)) return 0;
-                    value = kind == TK_SHL ? (int64_t)left << right : left >> right;
-                    break;
-                case TK_EQ: value = left == right; break;
-                case TK_NE: value = left != right; break;
-                case '<': value = left < right; break;
-                case '>': value = left > right; break;
-                case TK_LE: value = left <= right; break;
-                case TK_GE: value = left >= right; break;
-                case TK_AND: value = left && right; break;
-                case TK_OR: value = left || right; break;
+                    if (right < 0 || right >= 32 || (kind == TK_SHL && left < 0)) return 0;
+                    *result = kind == TK_SHL ? left << right : left >> right;
+                    return 1;
+                case TK_EQ: *result = left == right; return 1;
+                case TK_NE: *result = left != right; return 1;
+                case '<': *result = left < right; return 1;
+                case '>': *result = left > right; return 1;
+                case TK_LE: *result = left <= right; return 1;
+                case TK_GE: *result = left >= right; return 1;
+                case TK_AND: *result = left && right; return 1;
+                case TK_OR: *result = left || right; return 1;
                 default: return 0;
             }
-            if (value < INT_MIN || value > INT_MAX) return 0;
-            *result = (int)value;
-            return 1;
         }
         default: return 0;
     }
@@ -272,6 +282,7 @@ static void parameter_list(Parser *parser, Suffix *suffix) {
         if (accept(parser, ')')) return;
         restore(parser, look);
     }
+
     if (accept(parser, ')')) return;
     Node **tail = &suffix->nodes;
     for (;;) {
@@ -304,7 +315,7 @@ static CtType declarator(Parser *parser, CtType base, Token *name, Node **parame
     if (parser->status != CT_OK || !enter(parser)) return base;
     while (accept(parser, '*')) {
         base = type_pointer(base);
-        while (accept(parser, TK_CONST)) {}
+        while (parser->status == CT_OK && is_qualifier(parser->token.kind)) next(parser);
     }
     if (name) { *name = parser->token; name->length = 0; }
     Position before = mark(parser);
@@ -327,9 +338,9 @@ static CtType declarator(Parser *parser, CtType base, Token *name, Node **parame
         if (accept(parser, '[')) {
             if (parser->token.kind != ']') {
                 Node *size = expression(parser, 1);
-                int value = 0;
+                int64_t value = 0;
                 if (parser->status != CT_OK) break;
-                if (!constant_value(parser, size, &value) || value <= 0) {
+                if (!constant_value(parser, size, &value) || value <= 0 || value > (int64_t)TYPE_LIMIT * TYPE_LIMIT) {
                     fail(parser, "array size must be a positive integer constant expression");
                     break;
                 }
@@ -441,7 +452,7 @@ static CtType enum_specifier(Parser *parser, Node ***tail) {
         if (!declare_tag(parser, tag, CT_INT, TAG_ENUM)) return CT_INT;
     }
     next(parser);
-    int value = 0;
+    int64_t value = 0;
     while (parser->status == CT_OK && parser->token.kind != '}') {
         Token name = parser->token;
         expect(parser, TK_NAME, "expected an enumerator name");
@@ -450,6 +461,7 @@ static CtType enum_specifier(Parser *parser, Node ***tail) {
             if (parser->status == CT_OK) fail(parser, "an enumerator requires an integer constant expression");
             break;
         }
+        if (value < INT_MIN || value > INT_MAX) { fail(parser, "enumerator value does not fit in an int"); break; }
         Node *enumerator = node(parser, N_ENUMERATOR, name);
         Node *literal = node(parser, N_VALUE, name);
         if (!enumerator || !literal) break;
@@ -470,31 +482,92 @@ static CtType enum_specifier(Parser *parser, Node ***tail) {
     return CT_INT;
 }
 
+static int is_qualifier(int kind) { return kind == TK_CONST || kind == TK_VOLATILE || kind == TK_RESTRICT; }
+
+static int is_storage(int kind) {
+    return kind == TK_STATIC || kind == TK_EXTERN || kind == TK_REGISTER || kind == TK_INLINE || kind == TK_AUTO;
+}
+
+/* C17 6.7.2: the basic specifiers may appear in any order, so count them. */
+typedef struct { int sign, shorts, longs, chars, ints, floats, doubles, bools, voids; } Specifiers;
+
+static CtType basic_type(Parser *parser, const Specifiers *seen) {
+    int width = seen->shorts + seen->chars + seen->floats + seen->doubles + seen->bools + seen->voids;
+    if (seen->shorts > 1 || seen->longs > 2 || seen->chars > 1 || seen->ints > 1 ||
+        seen->floats > 1 || seen->doubles > 1 || seen->bools > 1 || seen->voids > 1 ||
+        (width > 1) || (seen->voids && (seen->ints || seen->longs || seen->sign)) ||
+        (seen->bools && (seen->ints || seen->longs || seen->sign)) ||
+        (seen->floats && (seen->ints || seen->longs || seen->sign)) ||
+        (seen->doubles && (seen->ints || seen->sign)) ||
+        (seen->chars && (seen->ints || seen->longs)) ||
+        (seen->shorts && seen->longs)) {
+        fail(parser, "conflicting type specifiers");
+        return CT_INT;
+    }
+    if (seen->voids) return CT_VOID;
+    if (seen->bools) return CT_BOOL;
+    if (seen->doubles) {
+        if (seen->longs) { fail(parser, "long double is not supported"); return CT_DOUBLE; }
+        return CT_DOUBLE;
+    }
+    if (seen->floats) return CT_FLOAT;
+    if (seen->chars) return seen->sign > 0 ? CT_SCHAR : seen->sign < 0 ? CT_UCHAR : CT_CHAR;
+    CtType type = seen->shorts ? CT_SHORT : seen->longs >= 2 ? CT_LLONG : seen->longs ? CT_LONG : CT_INT;
+    return seen->sign < 0 ? (CtType)(type + 1) : type;
+}
+
 static CtType type_specifier(Parser *parser, int *is_static, int *is_const, Node ***tail) {
-    while (parser->token.kind == TK_STATIC || parser->token.kind == TK_CONST) {
-        if (parser->token.kind == TK_STATIC) *is_static = 1;
-        else *is_const = 1;
+    Specifiers seen = {0};
+    CtType named = -1;
+    int count = 0;
+    while (parser->status == CT_OK) {
+        int kind = parser->token.kind;
+        if (is_storage(kind)) {
+            if (kind == TK_STATIC) *is_static = 1;
+            next(parser);
+            continue;
+        }
+        if (is_qualifier(kind)) {
+            if (kind == TK_CONST) *is_const = 1;
+            next(parser);
+            continue;
+        }
+        if (kind == TK_STRUCT || kind == TK_UNION || kind == TK_ENUM) {
+            if (named >= 0 || count) { fail(parser, "conflicting type specifiers"); break; }
+            named = kind == TK_ENUM ? enum_specifier(parser, tail) : aggregate_specifier(parser);
+            ++count;
+            continue;
+        }
+        if (kind == TK_NAME) {
+            if (named >= 0 || count) break;
+            Node *alias = find_alias(parser, parser->token, TAG_NAME, 0);
+            if (!alias) break;
+            named = alias->type;
+            ++count;
+            next(parser);
+            continue;
+        }
+        switch (kind) {
+            case TK_SIGNED: seen.sign = 1; break;
+            case TK_UNSIGNED: seen.sign = -1; break;
+            case TK_SHORT: ++seen.shorts; break;
+            case TK_LONG: ++seen.longs; break;
+            case TK_CHAR: ++seen.chars; break;
+            case TK_INT: ++seen.ints; break;
+            case TK_FLOAT: ++seen.floats; break;
+            case TK_DOUBLE: ++seen.doubles; break;
+            case TK_BOOL: ++seen.bools; break;
+            case TK_VOID: ++seen.voids; break;
+            default: kind = 0; break;
+        }
+        if (!kind) break;
+        if (named >= 0) { fail(parser, "conflicting type specifiers"); break; }
+        ++count;
         next(parser);
     }
-    CtType type = CT_INT;
-    switch (parser->token.kind) {
-        case TK_INT: type = CT_INT; next(parser); break;
-        case TK_DOUBLE: type = CT_DOUBLE; next(parser); break;
-        case TK_CHAR: type = CT_CHAR; next(parser); break;
-        case TK_VOID: type = CT_VOID; next(parser); break;
-        case TK_STRUCT: case TK_UNION: type = aggregate_specifier(parser); break;
-        case TK_ENUM: type = enum_specifier(parser, tail); break;
-        case TK_NAME: {
-            Node *alias = find_alias(parser, parser->token, TAG_NAME, 0);
-            if (!alias) { fail(parser, "unknown type name"); return CT_INT; }
-            type = alias->type;
-            next(parser);
-            break;
-        }
-        default: fail(parser, "expected a type"); return CT_INT;
-    }
-    while (accept(parser, TK_CONST)) *is_const = 1;
-    return type;
+    if (parser->status != CT_OK) return CT_INT;
+    if (!count) { fail(parser, "expected a type"); return CT_INT; }
+    return named >= 0 ? named : basic_type(parser, &seen);
 }
 
 static Node *primary(Parser *parser) {
@@ -710,7 +783,7 @@ static size_t initializer_extent(Parser *parser, Node *list) {
     for (Node *item = list->left; item; item = item->next, ++index) {
         if (item->kind == N_DESIGNATED) {
             Node *designator = item->left;
-            int value = 0;
+            int64_t value = 0;
             if (!designator || designator->tag_kind || !constant_value(parser, designator->left, &value) || value < 0) {
                 fail(parser, "an array designator requires a non-negative integer constant expression");
                 return 0;

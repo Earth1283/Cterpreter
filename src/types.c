@@ -1,5 +1,6 @@
 #include "types.h"
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -9,12 +10,28 @@ static TypeInfo *table;
 static size_t table_count, table_capacity;
 static unsigned table_references;
 
+#define SCALAR(k, type, sign, order) \
+    {.kind = (k), .size = sizeof(type), .align = sizeof(type), .is_signed = (sign), .rank = (order), .complete = 1}
+
 static const TypeInfo scalars[] = {
-    {.kind = TY_INT, .size = sizeof(int), .align = sizeof(int), .complete = 1},
-    {.kind = TY_DOUBLE, .size = sizeof(double), .align = sizeof(double), .complete = 1},
-    {.kind = TY_CHAR, .size = 1, .align = 1, .complete = 1},
+    SCALAR(TY_BOOL, _Bool, 0, 0),
+    SCALAR(TY_CHAR, char, (char)-1 < 0, 1),
+    SCALAR(TY_SCHAR, signed char, 1, 1),
+    SCALAR(TY_UCHAR, unsigned char, 0, 1),
+    SCALAR(TY_SHORT, short, 1, 2),
+    SCALAR(TY_USHORT, unsigned short, 0, 2),
+    SCALAR(TY_INT, int, 1, 3),
+    SCALAR(TY_UINT, unsigned, 0, 3),
+    SCALAR(TY_LONG, long, 1, 4),
+    SCALAR(TY_ULONG, unsigned long, 0, 4),
+    SCALAR(TY_LLONG, long long, 1, 5),
+    SCALAR(TY_ULLONG, unsigned long long, 0, 5),
+    SCALAR(TY_FLOAT, float, 1, 6),
+    SCALAR(TY_DOUBLE, double, 1, 7),
     {.kind = TY_VOID, .size = 0, .align = 1, .complete = 1}
 };
+
+_Static_assert(sizeof(long long) <= sizeof(int64_t), "Cterpreter requires long long to fit in 64 bits");
 
 static int seed(void) {
     if (table_count) return 1;
@@ -55,6 +72,44 @@ CtType type_decay(CtType type) {
     if (info->kind == TY_ARRAY) return type_pointer(info->target);
     if (info->kind == TY_FUNCTION) return type_pointer(type);
     return type;
+}
+
+uint64_t type_mask(CtType type) {
+    size_t bits = ct_type_size(type) * CHAR_BIT;
+    return bits >= 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
+}
+
+int64_t type_maximum(CtType type) {
+    const TypeInfo *info = type_info(type);
+    uint64_t mask = type_mask(type);
+    return info->is_signed ? (int64_t)(mask >> 1) : (int64_t)mask;
+}
+
+int64_t type_minimum(CtType type) {
+    const TypeInfo *info = type_info(type);
+    return info->is_signed ? -type_maximum(type) - 1 : 0;
+}
+
+CtType type_promote(CtType type) {
+    const TypeInfo *info = type_info(type);
+    if (!type_is_integer(type) || info->rank >= type_info(CT_INT)->rank) return type;
+    /* Every narrower type fits in int here, so the promotion never goes unsigned. */
+    return CT_INT;
+}
+
+CtType type_common(CtType left, CtType right) {
+    if (type_kind(left) == TY_DOUBLE || type_kind(right) == TY_DOUBLE) return CT_DOUBLE;
+    if (type_kind(left) == TY_FLOAT || type_kind(right) == TY_FLOAT) return CT_FLOAT;
+    left = type_promote(left);
+    right = type_promote(right);
+    if (left == right) return left;
+    const TypeInfo *a = type_info(left), *b = type_info(right);
+    if (a->is_signed == b->is_signed) return a->rank > b->rank ? left : right;
+    CtType unsigned_type = a->is_signed ? right : left;
+    CtType signed_type = a->is_signed ? left : right;
+    if (type_info(unsigned_type)->rank >= type_info(signed_type)->rank) return unsigned_type;
+    if (ct_type_size(signed_type) > ct_type_size(unsigned_type)) return signed_type;
+    return (CtType)(signed_type + 1);
 }
 
 CtType type_pointer(CtType target) {
@@ -191,6 +246,15 @@ static void text_number(Text *text, size_t value) {
     text_add(text, reversed, length);
 }
 
+static const char *basic_name(TypeKind kind) {
+    static const char *names[] = {
+        "_Bool", "char", "signed char", "unsigned char", "short", "unsigned short",
+        "int", "unsigned int", "long", "unsigned long", "long long", "unsigned long long",
+        "float", "double", "void"
+    };
+    return kind <= TY_VOID ? names[kind] : "int";
+}
+
 /* C declarator order: the prefix precedes the (empty) declarator, the suffix follows it. */
 static void name_parts(CtType type, Text *prefix, Text *suffix, unsigned depth) {
     const TypeInfo *info = type_info(type);
@@ -242,10 +306,8 @@ static void name_parts(CtType type, Text *prefix, Text *suffix, unsigned depth) 
             text_put(prefix, info->kind == TY_UNION ? "union " : "struct ");
             text_put(prefix, info->tag ? info->tag : "<anonymous>");
             break;
-        case TY_DOUBLE: text_put(prefix, "double"); break;
-        case TY_CHAR: text_put(prefix, "char"); break;
         case TY_VOID: text_put(prefix, "void"); break;
-        default: text_put(prefix, "int"); break;
+        default: text_put(prefix, basic_name(info->kind)); break;
     }
 }
 

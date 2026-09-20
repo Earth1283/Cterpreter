@@ -43,6 +43,18 @@ static void expect_real(const char *source, double value) {
     if (token.kind != TK_REAL || token.value.as.real != value) report(source, "floating-point literal");
 }
 
+static void expect_literal_type(const char *source, CtType expected) {
+    Lexer lexer;
+    lexer_init(&lexer, source);
+    Token token = lexer_next(&lexer);
+    if ((token.kind != TK_INTEGER && token.kind != TK_REAL) || token.value.type != expected) {
+        char detail[128], name[64];
+        ct_type_name(token.value.type, name, sizeof name);
+        (void)snprintf(detail, sizeof detail, "literal typed %s", name);
+        report(source, detail);
+    }
+}
+
 static void expect_lexer_error(const char *source, int incomplete) {
     Lexer lexer;
     lexer_init(&lexer, source);
@@ -121,9 +133,12 @@ int main(void) {
                        TK_DECREMENT, TK_LE, TK_GE, TK_EQ, TK_NE, TK_AND, TK_OR, '.', '-', '>'};
     expect_tokens("<<= >>= -> ... ++ -- <= >= == != && || . - >", operators, 15);
     int keywords[] = {TK_STRUCT, TK_UNION, TK_TYPEDEF, TK_ENUM, TK_GENERIC, TK_SIZEOF, TK_ALIGNOF,
-                      TK_SWITCH, TK_CASE, TK_DEFAULT, TK_GOTO, TK_STATIC, TK_CONST, TK_DO};
-    expect_tokens("struct union typedef enum _Generic sizeof _Alignof switch case default goto static const do",
-                  keywords, 14);
+                      TK_SWITCH, TK_CASE, TK_DEFAULT, TK_GOTO, TK_STATIC, TK_CONST, TK_DO,
+                      TK_SIGNED, TK_UNSIGNED, TK_SHORT, TK_LONG, TK_FLOAT, TK_BOOL,
+                      TK_VOLATILE, TK_RESTRICT, TK_EXTERN, TK_REGISTER, TK_INLINE, TK_AUTO};
+    expect_tokens("struct union typedef enum _Generic sizeof _Alignof switch case default goto static const do "
+                  "signed unsigned short long float _Bool volatile restrict extern register inline auto",
+                  keywords, 26);
     int commented[] = {TK_INT, TK_NAME, ';'};
     expect_tokens("int /* here */ value; // and here", commented, 3);
 
@@ -141,12 +156,22 @@ int main(void) {
     expect_real(".5f", 0.5);
     expect_real("0x1p3", 8.0);
 
+    expect_literal_type("1", CT_INT);
+    expect_literal_type("2147483648", CT_LONG);
+    expect_literal_type("1u", CT_UINT);
+    expect_literal_type("1l", CT_LONG);
+    expect_literal_type("1ul", CT_ULONG);
+    expect_literal_type("1ll", CT_LLONG);
+    expect_literal_type("0xffffffff", CT_UINT);
+    expect_literal_type("1.5", CT_DOUBLE);
+    expect_literal_type("1.5f", CT_FLOAT);
+
     expect_string("\"a\\tb\"", "a\tb", 3);
     expect_string("\"\\0embedded\"", "\0embedded", 9);
 
     expect_lexer_error("\"unterminated", 1);
     expect_lexer_error("/* unterminated", 1);
-    expect_lexer_error("2147483648", 0);
+    expect_lexer_error("18446744073709551616", 0);
     expect_lexer_error("'ab'", 0);
     expect_lexer_error("\"\\q\"", 0);
     expect_lexer_error("1.2.3", 0);
@@ -191,6 +216,13 @@ int main(void) {
     expect_tree("a->b;", "member b");
     expect_tree("(int){0};", "compound ( : int");
     expect_tree("int v[3] = { [2] = 9 };", "designated");
+    expect_tree("unsigned long long counter;", "declaration counter : unsigned long long");
+    expect_tree("signed char level;", "declaration level : signed char");
+    expect_tree("long unsigned int mixed;", "declaration mixed : unsigned long");
+    expect_tree("volatile const float ratio;", "declaration ratio : float");
+    expect_parse("long double wide;", CT_ERROR);
+    expect_parse("short long confused;", CT_ERROR);
+    expect_parse("unsigned double wrong;", CT_ERROR);
 
     if (failures) fprintf(stderr, "%d lexer/parser checks failed\n", failures);
     return failures ? EXIT_FAILURE : EXIT_SUCCESS;

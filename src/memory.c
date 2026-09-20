@@ -79,6 +79,9 @@ int memory_release(Memory *memory, uint64_t address, int heap_only) {
     return 1;
 }
 
+#define READ_AS(host, field) do { host stored; memcpy(&stored, data, size); value.as.field = stored; } while (0)
+#define WRITE_AS(host, field) do { host stored = (host)value.as.field; memcpy(data, &stored, size); } while (0)
+
 CtValue memory_read(Memory *memory, uint64_t address, CtType type) {
     CtValue value = {.type = type};
     size_t size = ct_type_size(type);
@@ -86,10 +89,23 @@ CtValue memory_read(Memory *memory, uint64_t address, CtType type) {
     if (address % ct_type_align(type)) { memory->error = "misaligned memory access"; return value; }
     void *data = memory_access(memory, address, size, 0);
     if (!data) return value;
-    if (type_is_pointer(type)) memcpy(&value.as.address, data, size);
-    else if (type == CT_DOUBLE) memcpy(&value.as.real, data, size);
-    else if (type == CT_CHAR) value.as.integer = *(char *)data;
-    else memcpy(&value.as.integer, data, size);
+    switch (type_kind(type)) {
+        case TY_BOOL: READ_AS(_Bool, integer); break;
+        case TY_CHAR: READ_AS(char, integer); break;
+        case TY_SCHAR: READ_AS(signed char, integer); break;
+        case TY_UCHAR: READ_AS(unsigned char, unsigned_integer); break;
+        case TY_SHORT: READ_AS(short, integer); break;
+        case TY_USHORT: READ_AS(unsigned short, unsigned_integer); break;
+        case TY_INT: READ_AS(int, integer); break;
+        case TY_UINT: READ_AS(unsigned, unsigned_integer); break;
+        case TY_LONG: READ_AS(long, integer); break;
+        case TY_ULONG: READ_AS(unsigned long, unsigned_integer); break;
+        case TY_LLONG: READ_AS(long long, integer); break;
+        case TY_ULLONG: READ_AS(unsigned long long, unsigned_integer); break;
+        case TY_FLOAT: READ_AS(float, real); break;
+        case TY_DOUBLE: READ_AS(double, real); break;
+        default: READ_AS(uint64_t, address); break;
+    }
     return value;
 }
 
@@ -99,10 +115,23 @@ int memory_write(Memory *memory, uint64_t address, CtValue value) {
     if (address % ct_type_align(value.type)) { memory->error = "misaligned memory access"; return 0; }
     void *data = memory_access(memory, address, size, 1);
     if (!data) return 0;
-    if (type_is_pointer(value.type)) memcpy(data, &value.as.address, size);
-    else if (value.type == CT_DOUBLE) memcpy(data, &value.as.real, size);
-    else if (value.type == CT_CHAR) *(char *)data = (char)value.as.integer;
-    else memcpy(data, &value.as.integer, size);
+    switch (type_kind(value.type)) {
+        case TY_BOOL: WRITE_AS(_Bool, integer); break;
+        case TY_CHAR: WRITE_AS(char, integer); break;
+        case TY_SCHAR: WRITE_AS(signed char, integer); break;
+        case TY_UCHAR: WRITE_AS(unsigned char, unsigned_integer); break;
+        case TY_SHORT: WRITE_AS(short, integer); break;
+        case TY_USHORT: WRITE_AS(unsigned short, unsigned_integer); break;
+        case TY_INT: WRITE_AS(int, integer); break;
+        case TY_UINT: WRITE_AS(unsigned, unsigned_integer); break;
+        case TY_LONG: WRITE_AS(long, integer); break;
+        case TY_ULONG: WRITE_AS(unsigned long, unsigned_integer); break;
+        case TY_LLONG: WRITE_AS(long long, integer); break;
+        case TY_ULLONG: WRITE_AS(unsigned long long, unsigned_integer); break;
+        case TY_FLOAT: WRITE_AS(float, real); break;
+        case TY_DOUBLE: WRITE_AS(double, real); break;
+        default: WRITE_AS(uint64_t, address); break;
+    }
     return 1;
 }
 

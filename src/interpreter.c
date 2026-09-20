@@ -15,10 +15,56 @@ typedef enum { FLOW_NORMAL, FLOW_RETURN, FLOW_BREAK, FLOW_CONTINUE, FLOW_GOTO } 
 typedef struct { Flow flow; CtValue value; int has_value; Token target; } Execution;
 typedef struct { uint64_t address; CtType type; int readonly; } Lvalue;
 
-static CtValue integer(int value) { return (CtValue){.type = CT_INT, .as.integer = value}; }
-static CtValue real(double value) { return (CtValue){.type = CT_DOUBLE, .as.real = value}; }
-static double as_real(CtValue value) { return value.type == CT_DOUBLE ? value.as.real : (double)value.as.integer; }
-static int truth(CtValue value) { return type_is_pointer(value.type) ? value.as.address != 0 : as_real(value) != 0.0; }
+static CtValue integer(int64_t value) { return (CtValue){.type = CT_INT, .as.integer = value}; }
+
+static double as_real(CtValue value) {
+    if (type_is_real(value.type)) return value.as.real;
+    return type_is_signed(value.type) ? (double)value.as.integer : (double)value.as.unsigned_integer;
+}
+
+static int truth(CtValue value) {
+    if (type_is_pointer(value.type)) return value.as.address != 0;
+    if (type_is_real(value.type)) return value.as.real != 0.0;
+    return value.as.integer != 0;
+}
+
+/* Reinterprets a bit pattern as the type, which is how unsigned arithmetic wraps. */
+static CtValue wrap(CtType type, uint64_t bits) {
+    CtValue value = {.type = type};
+    bits &= type_mask(type);
+    if (type_is_signed(type) && bits > (uint64_t)type_maximum(type))
+        value.as.integer = (int64_t)(bits - type_mask(type) - 1);
+    else value.as.unsigned_integer = bits;
+    return value;
+}
+
+static CtValue as_type(CtValue value, CtType type) {
+    if (value.type == type) return value;
+    if (type_is_real(type)) {
+        double result = as_real(value);
+        return (CtValue){.type = type, .as.real = type == CT_FLOAT ? (double)(float)result : result};
+    }
+    return wrap(type, value.as.unsigned_integer);
+}
+
+static int add_overflows(int64_t a, int64_t b, int64_t *result) {
+    if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) return 1;
+    *result = a + b;
+    return 0;
+}
+
+static int subtract_overflows(int64_t a, int64_t b, int64_t *result) {
+    if ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b)) return 1;
+    *result = a - b;
+    return 0;
+}
+
+static int multiply_overflows(int64_t a, int64_t b, int64_t *result) {
+    if (a && b && (a > 0 ? (b > 0 ? a > INT64_MAX / b : b < INT64_MIN / a)
+                         : (b > 0 ? a < INT64_MIN / b : a < INT64_MAX / b))) return 1;
+    *result = a * b;
+    return 0;
+}
 
 static void scope_clear(CtInterpreter *interpreter, Scope *scope) {
     Symbol *symbol = scope->symbols;
@@ -183,22 +229,31 @@ static CtValue convert(CtInterpreter *interpreter, Token token, CtValue value, C
     if (type_is_pointer(type)) {
         if (type_is_pointer(value.type)) return (CtValue){.type = type, .as.address = value.as.address};
         if (type_is_integer(value.type) && (explicit_cast || !value.as.integer))
-            return (CtValue){.type = type, .as.address = (uint64_t)(uint32_t)value.as.integer};
+            return (CtValue){.type = type, .as.address = value.as.unsigned_integer};
         return runtime_error(interpreter, token, "pointer conversion requires a pointer or zero");
     }
     if (type_is_pointer(value.type)) {
-        if (!explicit_cast || type == CT_DOUBLE)
+        if (!explicit_cast || type_is_real(type))
             return runtime_error(interpreter, token, "cannot convert a pointer to a number");
-        if (value.as.address > INT_MAX) return runtime_error(interpreter, token, "address does not fit in an int");
-        value = integer((int)value.as.address);
+        value = wrap(CT_ULLONG, value.as.address);
     }
-    if (type == CT_DOUBLE) return real(as_real(value));
-    double truncated = trunc(as_real(value));
-    if (!isfinite(truncated) || truncated < INT_MIN || truncated > INT_MAX)
-        return runtime_error(interpreter, token, "conversion to int is out of range");
-    CtValue result = integer((int)truncated);
-    if (type == CT_CHAR) result = (CtValue){.type = CT_CHAR, .as.integer = (char)result.as.integer};
-    return result;
+    if (type == CT_BOOL) return wrap(CT_BOOL, truth(value) ? 1u : 0u);
+    if (type_is_real(type)) {
+        double result = as_real(value);
+        if (type == CT_FLOAT) result = (double)(float)result;
+        if (!isfinite(result)) return runtime_error(interpreter, token, "floating-point conversion is not finite");
+        return (CtValue){.type = type, .as.real = result};
+    }
+    if (type_is_real(value.type)) {
+        double truncated = trunc(value.as.real);
+        double low = type_is_signed(type) ? (double)type_minimum(type) : 0.0;
+        double high = type_is_signed(type) ? (double)type_maximum(type) + 1.0 : (double)type_mask(type) + 1.0;
+        if (!isfinite(truncated) || !(truncated >= low && truncated < high))
+            return runtime_error(interpreter, token, "conversion to an integer type is out of range");
+        return type_is_signed(type) ? wrap(type, (uint64_t)(int64_t)truncated) : wrap(type, (uint64_t)truncated);
+    }
+    /* C17 6.3.1.3: narrowing between integer types wraps rather than trapping. */
+    return wrap(type, value.as.unsigned_integer);
 }
 
 CtValue runtime_convert(CtInterpreter *interpreter, Token token, CtValue value, CtType type) {
@@ -221,64 +276,127 @@ static int base_operator(int kind) {
     }
 }
 
+static CtValue integer_operation(CtInterpreter *interpreter, Token token, int kind,
+                                 CtValue left, CtValue right, CtType type) {
+    if (type_is_signed(type)) {
+        int64_t a = left.as.integer, b = right.as.integer, value = 0;
+        int overflowed = 0;
+        switch (kind) {
+            case '+': overflowed = add_overflows(a, b, &value); break;
+            case '-': overflowed = subtract_overflows(a, b, &value); break;
+            case '*': overflowed = multiply_overflows(a, b, &value); break;
+            case '/': case '%':
+                if (!b) return runtime_error(interpreter, token, "division by zero");
+                if (a == type_minimum(type) && b == -1) return runtime_error(interpreter, token, "signed integer overflow");
+                value = kind == '/' ? a / b : a % b;
+                break;
+            case '&': value = a & b; break;
+            case '|': value = a | b; break;
+            case '^': value = a ^ b; break;
+            default: return runtime_error(interpreter, token, "unsupported operator");
+        }
+        if (overflowed || value < type_minimum(type) || value > type_maximum(type))
+            return runtime_error(interpreter, token, "signed integer overflow");
+        return wrap(type, (uint64_t)value);
+    }
+    uint64_t a = left.as.unsigned_integer, b = right.as.unsigned_integer, value = 0;
+    switch (kind) {
+        case '+': value = a + b; break;
+        case '-': value = a - b; break;
+        case '*': value = a * b; break;
+        case '/': case '%':
+            if (!b) return runtime_error(interpreter, token, "division by zero");
+            value = kind == '/' ? a / b : a % b;
+            break;
+        case '&': value = a & b; break;
+        case '|': value = a | b; break;
+        case '^': value = a ^ b; break;
+        default: return runtime_error(interpreter, token, "unsupported operator");
+    }
+    return wrap(type, value);
+}
+
+static CtValue shift_operation(CtInterpreter *interpreter, Token token, int kind, CtValue left, CtValue right) {
+    CtType type = type_promote(left.type);
+    left = as_type(left, type);
+    right = as_type(right, type_promote(right.type));
+    int64_t count = type_is_signed(right.type) ? right.as.integer : (int64_t)right.as.unsigned_integer;
+    if (count < 0 || (size_t)count >= ct_type_size(type) * CHAR_BIT)
+        return runtime_error(interpreter, token, "shift count is outside the width of the type");
+    if (!type_is_signed(type))
+        return wrap(type, kind == TK_SHL ? left.as.unsigned_integer << count : left.as.unsigned_integer >> count);
+    if (left.as.integer < 0 && kind == TK_SHL)
+        return runtime_error(interpreter, token, "left shift of a negative value");
+    if (kind == TK_SHR) return wrap(type, (uint64_t)(left.as.integer >> count));
+    if (count && left.as.integer > (type_maximum(type) >> count))
+        return runtime_error(interpreter, token, "signed integer overflow");
+    return wrap(type, (uint64_t)(left.as.integer << count));
+}
+
+static CtValue pointer_operation(CtInterpreter *interpreter, Token token, int kind, CtValue left, CtValue right) {
+    if (!type_is_pointer(left.type) && kind == '+') { CtValue swap = left; left = right; right = swap; }
+    if (type_is_pointer(left.type) && type_is_pointer(right.type)) {
+        uint64_t a = left.as.address, b = right.as.address;
+        if (kind == TK_EQ) return integer(a == b);
+        if (kind == TK_NE) return integer(a != b);
+        Allocation *object = memory_find(&interpreter->memory, a);
+        if (!object || !object->alive || object != memory_find(&interpreter->memory, b))
+            return runtime_error(interpreter, token, "pointer operation requires the same live object");
+        if (kind == '<') return integer(a < b);
+        if (kind == '>') return integer(a > b);
+        if (kind == TK_LE) return integer(a <= b);
+        if (kind == TK_GE) return integer(a >= b);
+        if (kind == '-' && left.type == right.type) {
+            size_t size = ct_type_size(type_target(left.type));
+            if (!size) return runtime_error(interpreter, token, "arithmetic on void pointers is unsupported");
+            return (CtValue){.type = CT_LONG, .as.integer = ((int64_t)a - (int64_t)b) / (int64_t)size};
+        }
+        return runtime_error(interpreter, token, "invalid pointer operands");
+    }
+    CtValue other = type_is_pointer(left.type) ? right : left;
+    if ((kind == TK_EQ || kind == TK_NE) && type_is_integer(other.type) && !other.as.integer) {
+        int null = (type_is_pointer(left.type) ? left.as.address : right.as.address) == 0;
+        return integer(kind == TK_EQ ? null : !null);
+    }
+    if (type_is_pointer(left.type) && type_is_integer(right.type) && (kind == '+' || kind == '-')) {
+        size_t size = ct_type_size(type_target(left.type));
+        if (!size) return runtime_error(interpreter, token, "arithmetic on void pointers is unsupported");
+        int64_t count = type_is_signed(right.type) ? right.as.integer : (int64_t)right.as.unsigned_integer;
+        if (count && (count > INT64_MAX / (int64_t)size || count < INT64_MIN / (int64_t)size))
+            return runtime_error(interpreter, token, "pointer arithmetic outside object bounds");
+        int64_t offset = kind == '-' ? -(count * (int64_t)size) : count * (int64_t)size;
+        Allocation *object = memory_find(&interpreter->memory, left.as.address);
+        int64_t address = (int64_t)left.as.address + offset;
+        if (!object || !object->alive || address < (int64_t)object->address ||
+            address > (int64_t)(object->address + object->size))
+            return runtime_error(interpreter, token, "pointer arithmetic outside object bounds");
+        left.as.address = (uint64_t)address;
+        return left;
+    }
+    return runtime_error(interpreter, token, "invalid pointer operands");
+}
+
 static CtValue binary(CtInterpreter *interpreter, Token token, CtValue left, CtValue right) {
     int kind = base_operator(token.kind);
     if (left.type == CT_VOID || right.type == CT_VOID)
         return runtime_error(interpreter, token, "operator cannot use a void value");
     if (type_is_aggregate(left.type) || type_is_aggregate(right.type))
         return runtime_error(interpreter, token, "operator cannot use an aggregate value");
-    if (type_is_pointer(left.type) || type_is_pointer(right.type)) {
-        if (!type_is_pointer(left.type) && kind == '+') { CtValue swap = left; left = right; right = swap; }
-        if (type_is_pointer(left.type) && type_is_pointer(right.type)) {
-            uint64_t a = left.as.address, b = right.as.address;
-            if (kind == TK_EQ) return integer(a == b);
-            if (kind == TK_NE) return integer(a != b);
-            Allocation *object = memory_find(&interpreter->memory, a);
-            if (!object || !object->alive || object != memory_find(&interpreter->memory, b))
-                return runtime_error(interpreter, token, "pointer operation requires the same live object");
-            if (kind == '<') return integer(a < b);
-            if (kind == '>') return integer(a > b);
-            if (kind == TK_LE) return integer(a <= b);
-            if (kind == TK_GE) return integer(a >= b);
-            if (kind == '-' && left.type == right.type) {
-                size_t size = ct_type_size(type_target(left.type));
-                if (!size) return runtime_error(interpreter, token, "arithmetic on void pointers is unsupported");
-                int64_t difference = (int64_t)a - (int64_t)b;
-                return integer((int)(difference / (int64_t)size));
-            }
-        } else if ((kind == TK_EQ || kind == TK_NE) &&
-                   (type_is_pointer(left.type) ? type_is_integer(right.type) && right.as.integer == 0
-                                               : type_is_integer(left.type) && left.as.integer == 0)) {
-            int null = (type_is_pointer(left.type) ? left.as.address : right.as.address) == 0;
-            return integer(kind == TK_EQ ? null : !null);
-        } else if (type_is_pointer(left.type) && type_is_integer(right.type) && (kind == '+' || kind == '-')) {
-            size_t size = ct_type_size(type_target(left.type));
-            if (!size) return runtime_error(interpreter, token, "arithmetic on void pointers is unsupported");
-            int64_t offset = (int64_t)right.as.integer * (int64_t)size;
-            if (kind == '-') offset = -offset;
-            Allocation *object = memory_find(&interpreter->memory, left.as.address);
-            int64_t address = (int64_t)left.as.address + offset;
-            if (!object || !object->alive || address < (int64_t)object->address ||
-                address > (int64_t)(object->address + object->size))
-                return runtime_error(interpreter, token, "pointer arithmetic outside object bounds");
-            left.as.address = (uint64_t)address;
-            return left;
-        }
-        return runtime_error(interpreter, token, "invalid pointer operands");
-    }
-    double a = as_real(left), b = as_real(right);
-    switch (kind) {
-        case TK_EQ: return integer(a == b);
-        case TK_NE: return integer(a != b);
-        case '<': return integer(a < b);
-        case '>': return integer(a > b);
-        case TK_LE: return integer(a <= b);
-        case TK_GE: return integer(a >= b);
-        default: break;
-    }
-    if (left.type == CT_DOUBLE || right.type == CT_DOUBLE) {
-        double value = 0.0;
+    if (type_is_pointer(left.type) || type_is_pointer(right.type))
+        return pointer_operation(interpreter, token, kind, left, right);
+    if (kind == TK_SHL || kind == TK_SHR) return shift_operation(interpreter, token, kind, left, right);
+    CtType type = type_common(left.type, right.type);
+    left = as_type(left, type);
+    right = as_type(right, type);
+    if (type_is_real(type)) {
+        double a = left.as.real, b = right.as.real, value = 0.0;
         switch (kind) {
+            case TK_EQ: return integer(a == b);
+            case TK_NE: return integer(a != b);
+            case '<': return integer(a < b);
+            case '>': return integer(a > b);
+            case TK_LE: return integer(a <= b);
+            case TK_GE: return integer(a >= b);
             case '+': value = a + b; break;
             case '-': value = a - b; break;
             case '*': value = a * b; break;
@@ -288,33 +406,29 @@ static CtValue binary(CtInterpreter *interpreter, Token token, CtValue left, CtV
                 break;
             default: return runtime_error(interpreter, token, "operator requires integer operands");
         }
+        if (type == CT_FLOAT) value = (double)(float)value;
         if (!isfinite(value)) return runtime_error(interpreter, token, "floating-point result is not finite");
-        return real(value);
+        return (CtValue){.type = type, .as.real = value};
     }
-    int64_t x = left.as.integer, y = right.as.integer, value = 0;
     switch (kind) {
-        case '+': value = x + y; break;
-        case '-': value = x - y; break;
-        case '*': value = x * y; break;
-        case '/': case '%':
-            if (!y) return runtime_error(interpreter, token, "division by zero");
-            if (x == INT_MIN && y == -1) return runtime_error(interpreter, token, "signed integer overflow");
-            value = kind == '/' ? x / y : x % y;
-            break;
-        case '&': return integer(left.as.integer & right.as.integer);
-        case '|': return integer(left.as.integer | right.as.integer);
-        case '^': return integer(left.as.integer ^ right.as.integer);
-        case TK_SHL: case TK_SHR:
-            if (y < 0 || y >= (int64_t)(sizeof(int) * CHAR_BIT))
-                return runtime_error(interpreter, token, "shift count is outside the int width");
-            if (kind == TK_SHR) return integer(left.as.integer >> (unsigned)y);
-            if (x < 0) return runtime_error(interpreter, token, "left shift of a negative value");
-            value = x << (unsigned)y;
-            break;
-        default: return runtime_error(interpreter, token, "unsupported operator");
+        case TK_EQ: case TK_NE: case '<': case '>': case TK_LE: case TK_GE: {
+            int order;
+            if (type_is_signed(type))
+                order = left.as.integer < right.as.integer ? -1 : left.as.integer > right.as.integer;
+            else
+                order = left.as.unsigned_integer < right.as.unsigned_integer ? -1
+                      : left.as.unsigned_integer > right.as.unsigned_integer;
+            switch (kind) {
+                case TK_EQ: return integer(order == 0);
+                case TK_NE: return integer(order != 0);
+                case '<': return integer(order < 0);
+                case '>': return integer(order > 0);
+                case TK_LE: return integer(order <= 0);
+                default: return integer(order >= 0);
+            }
+        }
+        default: return integer_operation(interpreter, token, kind, left, right, type);
     }
-    if (value < INT_MIN || value > INT_MAX) return runtime_error(interpreter, token, "signed integer overflow");
-    return integer((int)value);
 }
 
 static CtValue evaluate(CtInterpreter *interpreter, Node *node);
@@ -387,7 +501,7 @@ static CtType expression_type(CtInterpreter *interpreter, Node *node, unsigned d
         case N_STRING: return type_pointer(CT_CHAR);
         case N_CAST: return node->type;
         case N_COMPOUND: return type_decay(node->type);
-        case N_SIZEOF: case N_ALIGNOF: return CT_INT;
+        case N_SIZEOF: case N_ALIGNOF: return CT_ULONG;
         case N_INDEX: case N_MEMBER: return type_decay(object_type(interpreter, node, depth));
         case N_NAME: {
             Symbol *symbol = lookup(interpreter->scope, node->token, 0);
@@ -415,27 +529,31 @@ static CtType expression_type(CtInterpreter *interpreter, Node *node, unsigned d
         case N_UNARY: case N_POSTFIX: {
             if (node->token.kind == '&') return type_pointer(object_type(interpreter, node->left, depth + 1));
             if (node->token.kind == '*') return type_decay(object_type(interpreter, node, depth));
-            CtType type = expression_type(interpreter, node->left, depth + 1);
             if (node->token.kind == '!') return CT_INT;
-            return type == CT_CHAR ? CT_INT : type;
+            CtType type = expression_type(interpreter, node->left, depth + 1);
+            if (node->kind == N_POSTFIX || node->token.kind == TK_INCREMENT || node->token.kind == TK_DECREMENT)
+                return type;
+            return type_promote(type);
         }
         case N_BINARY: {
             int op = node->token.kind;
             CtType left = expression_type(interpreter, node->left, depth + 1);
             if (is_assignment(op)) return left;
-            if (op != '+' && op != '-' && op != '*' && op != '/') return CT_INT;
+            if (op == TK_SHL || op == TK_SHR) return type_promote(left);
+            if (op != '+' && op != '-' && op != '*' && op != '/' && op != '%' &&
+                op != '&' && op != '|' && op != '^') return CT_INT;
             CtType right = expression_type(interpreter, node->right, depth + 1);
-            if (type_is_pointer(left) && type_is_pointer(right) && op == '-') return CT_INT;
+            if (type_is_pointer(left) && type_is_pointer(right)) return op == '-' ? CT_LONG : CT_INT;
             if (type_is_pointer(left)) return left;
             if (type_is_pointer(right)) return right;
-            return left == CT_DOUBLE || right == CT_DOUBLE ? CT_DOUBLE : CT_INT;
+            return type_common(left, right);
         }
         case N_CONDITIONAL: {
             CtType a = expression_type(interpreter, node->right, depth + 1);
             CtType b = expression_type(interpreter, node->third, depth + 1);
-            if (type_is_pointer(a) || type_is_aggregate(a)) return a;
-            if (type_is_pointer(b) || type_is_aggregate(b)) return b;
-            return a == CT_DOUBLE || b == CT_DOUBLE ? CT_DOUBLE : CT_INT;
+            if (type_is_pointer(a) || type_is_aggregate(a) || a == CT_VOID) return a;
+            if (type_is_pointer(b) || type_is_aggregate(b) || b == CT_VOID) return b;
+            return type_common(a, b);
         }
         default: return CT_INT;
     }
@@ -791,7 +909,7 @@ static CtValue evaluate_inner(CtInterpreter *interpreter, Node *node) {
             size_t size = node->kind == N_SIZEOF ? ct_type_size(type) : ct_type_align(type);
             if (!size || !type_info(type)->complete)
                 return runtime_error(interpreter, node->token, "sizeof requires a complete object type");
-            return integer((int)size);
+            return wrap(CT_ULONG, size);
         }
         case N_CALL: return call(interpreter, node);
         case N_UNARY: case N_POSTFIX: {
@@ -817,15 +935,18 @@ static CtValue evaluate_inner(CtInterpreter *interpreter, Node *node) {
             if (interpreter->failed) return integer(0);
             if (op == '!') return integer(!truth(value));
             if (!type_is_number(value.type)) return runtime_error(interpreter, node->token, "operator requires a numeric operand");
-            if (value.type == CT_CHAR) value.type = CT_INT;
+            value = as_type(value, type_promote(value.type));
             if (op == '+') return value;
             if (op == '~') {
-                if (value.type != CT_INT) return runtime_error(interpreter, node->token, "operator requires an integer operand");
-                return integer(~value.as.integer);
+                if (!type_is_integer(value.type)) return runtime_error(interpreter, node->token, "operator requires an integer operand");
+                return wrap(value.type, ~value.as.unsigned_integer);
             }
-            if (value.type == CT_DOUBLE) return real(-value.as.real);
-            if (value.as.integer == INT_MIN) return runtime_error(interpreter, node->token, "signed integer overflow");
-            return integer(-value.as.integer);
+            if (type_is_real(value.type))
+                return (CtValue){.type = value.type, .as.real = -value.as.real};
+            if (!type_is_signed(value.type)) return wrap(value.type, 0u - value.as.unsigned_integer);
+            if (value.as.integer == type_minimum(value.type))
+                return runtime_error(interpreter, node->token, "signed integer overflow");
+            return wrap(value.type, (uint64_t)-value.as.integer);
         }
         case N_CONDITIONAL: {
             CtValue condition = evaluate(interpreter, node->left);
@@ -984,6 +1105,7 @@ static Execution execute_inner(CtInterpreter *interpreter, Node *node) {
         case N_SWITCH: {
             CtValue value = evaluate(interpreter, node->left);
             if (!type_is_integer(value.type)) { (void)runtime_error(interpreter, node->token, "switch requires an integer"); break; }
+            value = as_type(value, type_promote(value.type));
             Node *match = NULL, *fallback = NULL;
             for (Node *item = node->right->left; item && !interpreter->failed; item = item->next) {
                 if (item->kind != N_CASE) continue;
@@ -1134,11 +1256,13 @@ void ct_format_value(CtValue value, char *buffer, size_t capacity) {
         (void)snprintf(buffer, capacity, "%s at 0x%llx", name, (unsigned long long)value.as.address);
     } else if (type_is_pointer(value.type)) (void)snprintf(buffer, capacity, "0x%llx", (unsigned long long)value.as.address);
     else if (value.type == CT_VOID) (void)snprintf(buffer, capacity, "void");
-    else if (value.type != CT_DOUBLE) (void)snprintf(buffer, capacity, "%d", value.as.integer);
-    else {
-        (void)snprintf(buffer, capacity, "%.17g", value.as.real);
+    else if (type_is_integer(value.type)) {
+        if (type_is_signed(value.type)) (void)snprintf(buffer, capacity, "%lld", (long long)value.as.integer);
+        else (void)snprintf(buffer, capacity, "%llu", (unsigned long long)value.as.unsigned_integer);
+    } else {
+        (void)snprintf(buffer, capacity, value.type == CT_FLOAT ? "%.9g" : "%.17g", value.as.real);
         size_t length = strlen(buffer);
-        if (!strpbrk(buffer, ".eE") && length + 2 < capacity) {
+        if (!strpbrk(buffer, ".eEn") && length + 2 < capacity) {
             buffer[length] = '.';
             buffer[length + 1] = '0';
             buffer[length + 2] = '\0';
@@ -1250,7 +1374,7 @@ CtStatus ct_run_main(CtInterpreter *interpreter, int argc, const char *const *ar
         call_node.right = &argc_node;
     }
     CtValue result = call(interpreter, &call_node);
-    if (!interpreter->failed) *exit_status = interpreter->exit_requested ? interpreter->exit_status : result.as.integer;
+    if (!interpreter->failed) *exit_status = interpreter->exit_requested ? interpreter->exit_status : (int)result.as.integer;
     return interpreter->failed ? CT_ERROR : CT_OK;
 }
 

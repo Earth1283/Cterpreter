@@ -11,10 +11,13 @@
 
 typedef struct CtInterpreter CtInterpreter;
 typedef int CtType;
-enum { CT_INT, CT_DOUBLE, CT_CHAR, CT_VOID };
+enum {
+    CT_BOOL, CT_CHAR, CT_SCHAR, CT_UCHAR, CT_SHORT, CT_USHORT, CT_INT, CT_UINT,
+    CT_LONG, CT_ULONG, CT_LLONG, CT_ULLONG, CT_FLOAT, CT_DOUBLE, CT_VOID
+};
 typedef struct {
     CtType type;
-    union { int integer; double real; uint64_t address; } as;
+    union { int64_t integer; uint64_t unsigned_integer; double real; uint64_t address; } as;
 } CtValue;
 typedef struct {
     size_t line;

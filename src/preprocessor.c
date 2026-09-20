@@ -443,12 +443,12 @@ static char *clean_source(Expansion *expansion, const char *source) {
 
 static int process(Expansion *expansion, const char *source, Text *output, unsigned depth);
 
-#define PP_COMMON "#define NULL 0\n#define size_t int\n"
+#define PP_COMMON "#define NULL 0\n#define size_t unsigned long\n"
 
 /* Standard headers are supplied as definitions; the functions themselves are built in. */
 static char *header_definitions(const char *header) {
     static const struct { const char *name, *body; } headers[] = {
-        {"stddef.h", PP_COMMON "#define ptrdiff_t int\n"
+        {"stddef.h", PP_COMMON "#define ptrdiff_t long\n"
                      "#define offsetof(type, member) ((size_t)&((type *)0)->member)\n"},
         {"stdio.h", PP_COMMON "#define FILE void\n#define EOF (-1)\n#define BUFSIZ 512\n"
                     "#define SEEK_SET 0\n#define SEEK_CUR 1\n#define SEEK_END 2\n"},
@@ -456,14 +456,14 @@ static char *header_definitions(const char *header) {
         {"string.h", PP_COMMON},
         {"math.h", PP_COMMON},
         {"ctype.h", ""},
-        {"stdbool.h", "#define bool int\n#define true 1\n#define false 0\n"
+        {"stdbool.h", "#define bool _Bool\n#define true 1\n#define false 0\n"
                       "#define __bool_true_false_are_defined 1\n"},
         {"iso646.h", "#define and &&\n#define and_eq &=\n#define bitand &\n#define bitor |\n"
                      "#define compl ~\n#define not !\n#define not_eq !=\n#define or ||\n"
                      "#define or_eq |=\n#define xor ^\n#define xor_eq ^=\n"},
         {"assert.h", "#undef assert\n#ifdef NDEBUG\n#define assert(e) ((void)0)\n#else\n"
                      "#define assert(e) ((e) || __assert_fail(#e, __FILE__, __LINE__))\n#endif\n"},
-        {"limits.h", NULL}, {"float.h", NULL}, {"time.h", NULL}, {"errno.h", NULL}
+        {"limits.h", NULL}, {"float.h", NULL}, {"time.h", NULL}, {"errno.h", NULL}, {"stdint.h", NULL}
     };
     char generated[768] = "";
     if (!strcmp(header, "limits.h"))
@@ -471,19 +471,39 @@ static char *header_definitions(const char *header) {
                        "#define CHAR_BIT %d\n#define SCHAR_MIN (-%d - 1)\n#define SCHAR_MAX %d\n"
                        "#define UCHAR_MAX %d\n#define CHAR_MIN %d\n#define CHAR_MAX %d\n"
                        "#define SHRT_MIN (-%d - 1)\n#define SHRT_MAX %d\n#define USHRT_MAX %d\n"
-                       "#define INT_MIN (-%d - 1)\n#define INT_MAX %d\n",
+                       "#define INT_MIN (-%d - 1)\n#define INT_MAX %d\n#define UINT_MAX %uU\n"
+                       "#define LONG_MIN (-%ldL - 1)\n#define LONG_MAX %ldL\n#define ULONG_MAX %luUL\n"
+                       "#define LLONG_MIN (-%lldLL - 1)\n#define LLONG_MAX %lldLL\n#define ULLONG_MAX %lluULL\n"
+                       "#define MB_LEN_MAX 1\n",
                        CHAR_BIT, SCHAR_MAX, SCHAR_MAX, UCHAR_MAX, CHAR_MIN, CHAR_MAX,
-                       SHRT_MAX, SHRT_MAX, USHRT_MAX, INT_MAX, INT_MAX);
+                       SHRT_MAX, SHRT_MAX, USHRT_MAX, INT_MAX, INT_MAX, UINT_MAX,
+                       LONG_MAX, LONG_MAX, ULONG_MAX, LLONG_MAX, LLONG_MAX, ULLONG_MAX);
     else if (!strcmp(header, "float.h"))
         (void)snprintf(generated, sizeof generated,
                        "#define DBL_DIG %d\n#define DBL_MANT_DIG %d\n#define DBL_MAX %.17g\n"
                        "#define DBL_MIN %.17g\n#define DBL_EPSILON %.17g\n"
-                       "#define DBL_MAX_10_EXP %d\n#define DBL_MIN_10_EXP (%d)\n",
-                       DBL_DIG, DBL_MANT_DIG, DBL_MAX, DBL_MIN, DBL_EPSILON, DBL_MAX_10_EXP, DBL_MIN_10_EXP);
+                       "#define DBL_MAX_10_EXP %d\n#define DBL_MIN_10_EXP (%d)\n"
+                       "#define FLT_DIG %d\n#define FLT_MANT_DIG %d\n#define FLT_MAX %.9gf\n"
+                       "#define FLT_MIN %.9gf\n#define FLT_EPSILON %.9gf\n",
+                       DBL_DIG, DBL_MANT_DIG, DBL_MAX, DBL_MIN, DBL_EPSILON, DBL_MAX_10_EXP, DBL_MIN_10_EXP,
+                       FLT_DIG, FLT_MANT_DIG, (double)FLT_MAX, (double)FLT_MIN, (double)FLT_EPSILON);
     else if (!strcmp(header, "time.h"))
         (void)snprintf(generated, sizeof generated,
-                       PP_COMMON "#define time_t int\n#define clock_t int\n#define CLOCKS_PER_SEC %ld\n",
+                       PP_COMMON "#define time_t long\n#define clock_t long\n#define CLOCKS_PER_SEC %ldL\n",
                        (long)CLOCKS_PER_SEC);
+    else if (!strcmp(header, "stdint.h"))
+        (void)snprintf(generated, sizeof generated,
+                       "#define int8_t signed char\n#define uint8_t unsigned char\n"
+                       "#define int16_t short\n#define uint16_t unsigned short\n"
+                       "#define int32_t int\n#define uint32_t unsigned int\n"
+                       "#define int64_t long\n#define uint64_t unsigned long\n"
+                       "#define intptr_t long\n#define uintptr_t unsigned long\n"
+                       "#define intmax_t long long\n#define uintmax_t unsigned long long\n"
+                       "#define INT8_MAX %d\n#define INT16_MAX %d\n#define INT32_MAX %d\n"
+                       "#define INT64_MAX %lldLL\n#define UINT8_MAX %d\n#define UINT16_MAX %d\n"
+                       "#define UINT32_MAX %uU\n#define UINT64_MAX %lluULL\n#define SIZE_MAX %luUL\n",
+                       SCHAR_MAX, SHRT_MAX, INT_MAX, LLONG_MAX, UCHAR_MAX, USHRT_MAX,
+                       UINT_MAX, ULLONG_MAX, ULONG_MAX);
     else if (!strcmp(header, "errno.h"))
         (void)snprintf(generated, sizeof generated,
                        "#define EDOM %d\n#define ERANGE %d\n#define EILSEQ %d\n#define ENOENT %d\n"
