@@ -61,3 +61,14 @@ dkms.conf
 .idea/
 .vscode/
 tmp/
+
+# CMake build output (the debug preset uses build/)
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+Makefile
+CTestTestfile.cmake
+compile_commands.json
+CMakeUserPresets.json
