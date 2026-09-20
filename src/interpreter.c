@@ -51,6 +51,7 @@ CtInterpreter *ct_create(void) {
         interpreter->errors = stderr;
         interpreter->step_limit = 1000000;
         interpreter->depth_limit = 256;
+        interpreter->nesting_limit = 8;
         interpreter->random_state = 1;
     }
     return interpreter;
@@ -104,7 +105,8 @@ CtValue runtime_error(CtInterpreter *interpreter, Token token, const char *messa
 static CtValue memory_error(CtInterpreter *interpreter, Token token) {
     const char *message = interpreter->memory.error ? interpreter->memory.error : "invalid memory access";
     if (interpreter->strict) {
-        fprintf(interpreter->errors, "%s:%zu:%zu: %s\n",
+        fflush(interpreter->output);
+        fprintf(interpreter->errors, "%s:%zu:%zu: error: %s\n",
                 interpreter->filename ? interpreter->filename : "<stdin>", token.line, token.column, message);
         fflush(NULL);
         raise(SIGSEGV);
@@ -1193,7 +1195,12 @@ void ct_set_limits(CtInterpreter *interpreter, size_t steps, unsigned depth) {
     interpreter->depth_limit = depth ? depth : 256;
 }
 
-unsigned ct_depth(CtInterpreter *interpreter) { return interpreter->depth; }
+unsigned ct_depth(CtInterpreter *interpreter) { return interpreter->nesting; }
+
+void ct_set_nesting(CtInterpreter *interpreter, unsigned level, unsigned limit) {
+    interpreter->nesting = level;
+    interpreter->nesting_limit = limit ? limit : 8;
+}
 
 int ct_has_function(CtInterpreter *interpreter, const char *name) {
     Token token = {.start = name, .length = strlen(name)};
@@ -1314,6 +1321,7 @@ void ct_dump(CtInterpreter *interpreter, FILE *output) {
     }
     fprintf(output, "Memory: %zu live bytes; limits: %zu steps, %u evaluation depth\n",
             interpreter->memory.bytes, interpreter->step_limit, interpreter->depth_limit);
+    fprintf(output, "Interpreter nesting: level %u of %u\n", interpreter->nesting, interpreter->nesting_limit);
 }
 
 int ct_exit_status(CtInterpreter *interpreter, int *status) {

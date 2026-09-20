@@ -48,7 +48,7 @@ struct CtInterpreter {
     CtError *error;
     const volatile sig_atomic_t *interrupt;
     FILE *input, *output, *errors;
-    unsigned depth, depth_limit;
+    unsigned depth, depth_limit, nesting, nesting_limit;
     size_t steps, step_limit;
     int failed, exit_requested, exit_status, strict;
     uint64_t error_number, token_state;

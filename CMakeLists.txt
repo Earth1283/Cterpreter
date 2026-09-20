@@ -11,7 +11,7 @@ option(CT_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OF
 add_library(cterpreter_core src/lexer.c src/parser.c src/interpreter.c src/memory.c src/builtins.c src/preprocessor.c src/types.c)
 target_include_directories(cterpreter_core PUBLIC include PRIVATE src)
 
-add_executable(Cterpreter main.c src/terminal.c)
+add_executable(Cterpreter main.c src/terminal.c src/boot.c)
 target_include_directories(Cterpreter PRIVATE src)
 target_link_libraries(Cterpreter PRIVATE cterpreter_core)
 

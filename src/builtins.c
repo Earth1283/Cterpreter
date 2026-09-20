@@ -67,7 +67,8 @@ static const struct { const char *name; ReturnKind type; unsigned char arity; } 
     {"isupper", RT_INT, 1}, {"islower", RT_INT, 1}, {"ispunct", RT_INT, 1}, {"isprint", RT_INT, 1},
     {"isgraph", RT_INT, 1}, {"iscntrl", RT_INT, 1}, {"isxdigit", RT_INT, 1}, {"isblank", RT_INT, 1},
     {"toupper", RT_INT, 1}, {"tolower", RT_INT, 1},
-    {"__assert_fail", RT_INT, 3}
+    {"__assert_fail", RT_INT, 3},
+    {"interpret", RT_INT, 1}, {"interpret_depth", RT_INT, 0}
 };
 
 int builtin_type(Token name, CtType *type) {
@@ -615,6 +616,49 @@ static CtValue file_call(CtInterpreter *interpreter, Token name, const CtValue *
     return integer(result);
 }
 
+/* A nested interpreter shares the caller's streams and its remaining budget. */
+static CtValue interpret(CtInterpreter *interpreter, Token name, CtValue argument) {
+    char *path = string(interpreter, name, argument);
+    if (interpreter->failed) return integer(0);
+    if (interpreter->nesting + 1 >= interpreter->nesting_limit)
+        return runtime_error(interpreter, name, "nested interpreter limit exceeded");
+    FILE *file = fopen(path, "rb");
+    if (!file) { set_errno(interpreter, errno); return integer(-1); }
+    Output source = {0};
+    char buffer[4096];
+    size_t bytes;
+    int ok = 1;
+    while (ok && (bytes = fread(buffer, 1, sizeof buffer, file)) != 0) ok = append(&source, buffer, bytes);
+    if (ferror(file)) ok = 0;
+    fclose(file);
+    if (!ok) { free(source.data); return runtime_error(interpreter, name, "could not read the nested source"); }
+    CtInterpreter *child = ct_create();
+    if (!child) { free(source.data); return runtime_error(interpreter, name, "out of memory"); }
+    size_t budget = interpreter->step_limit > interpreter->steps ? interpreter->step_limit - interpreter->steps : 1;
+    ct_set_streams(child, interpreter->input, interpreter->output, interpreter->errors);
+    ct_set_interrupt(child, interpreter->interrupt);
+    ct_set_limits(child, budget, interpreter->depth_limit);
+    ct_set_nesting(child, interpreter->nesting + 1, interpreter->nesting_limit);
+    ct_set_strict(child, interpreter->strict);
+    ct_set_filename(child, path);
+    CtError diagnostic = {0};
+    CtValue result;
+    int has_result, status = 0;
+    if (ct_eval(child, source.data ? source.data : "", &result, &has_result, &diagnostic) != CT_OK) status = 1;
+    else if (ct_exit_status(child, &status)) {}
+    else if (ct_has_function(child, "main")) {
+        const char *arguments[] = {path};
+        if (ct_run_main(child, 1, arguments, &status, &diagnostic) != CT_OK) status = 1;
+    }
+    if (status == 1 && diagnostic.message[0]) fflush(interpreter->output);
+    if (status == 1 && diagnostic.message[0])
+        fprintf(interpreter->errors, "%s:%zu:%zu: error: %s\n", path, diagnostic.line, diagnostic.column, diagnostic.message);
+    interpreter->steps += budget - (child->step_limit > child->steps ? child->step_limit - child->steps : 0);
+    ct_destroy(child);
+    free(source.data);
+    return integer(status);
+}
+
 CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args, size_t count) {
     if (named(name, "printf") || named(name, "sprintf") || named(name, "snprintf") || named(name, "fprintf")) return formatted(interpreter, name, args, count);
     if (named(name, "scanf") || named(name, "sscanf") || named(name, "fscanf")) return scanned(interpreter, name, args, count);
@@ -632,6 +676,8 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
         return integer((int)((interpreter->random_state / 65536u) % 32768u));
     }
     if (named(name, "abort")) return runtime_error(interpreter, name, "the program called abort");
+    if (named(name, "interpret_depth")) return integer((int)interpreter->nesting);
+    if (named(name, "interpret")) return interpret(interpreter, name, args[0]);
     if (named(name, "puts")) {
         char *text = string(interpreter, name, args[0]);
         if (!text) return integer(EOF);

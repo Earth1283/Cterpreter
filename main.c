@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "cterpreter.h"
+#include "boot.h"
 #include "terminal.h"
 
 #include <ctype.h>
@@ -21,8 +22,8 @@ typedef struct {
     Buffer source;
     const char *prompt, *history_path;
     size_t steps;
-    unsigned depth;
-    int color, verbose;
+    unsigned depth, nesting;
+    int color, verbose, strict;
 } Application;
 
 static void handle_interrupt(int signal_number) {
@@ -83,6 +84,7 @@ static ReadStatus read_input(FILE *stream, Buffer *buffer, int one_line) {
 
 static void print_error(Application *app, const char *name, const CtError *error, const char *source) {
     int color = app->color && isatty(STDERR_FILENO);
+    fflush(stdout);
     if (color) fputs("\033[31m", stderr);
     fprintf(stderr, "%s:%zu:%zu: error: %s\n", name, error->line, error->column, error->message);
     if (color) fputs("\033[0m", stderr);
@@ -138,6 +140,8 @@ static CtInterpreter *create_interpreter(Application *app) {
     if (interpreter) {
         ct_set_interrupt(interpreter, &interrupted);
         ct_set_limits(interpreter, app->steps, app->depth);
+        ct_set_nesting(interpreter, 0, app->nesting);
+        ct_set_strict(interpreter, app->strict);
     }
     return interpreter;
 }
@@ -170,10 +174,12 @@ static int command(Application *app, char *source) {
              ".source            Show accepted session source\n"
              ".load FILE         Execute source in the current session\n"
              ".save FILE         Save session source for replay\n"
-             ".restore FILE      Replay source into a fresh session\n\n"
+             ".restore FILE      Replay source into a fresh session\n"
+             ".depth             Show the interpreter's own nesting level\n\n"
              "Arrows edit or recall history. Ctrl+R searches history using the current text.\n"
              "Tab accepts a suggestion. Ctrl+C cancels input or execution. Ctrl+D exits.");
     } else if (!strcmp(source, ".vars") || !strcmp(source, ".dump")) ct_dump(app->interpreter, stdout);
+    else if (!strcmp(source, ".depth")) printf("Interpreter nesting level %u\n", ct_depth(app->interpreter));
     else if (!strcmp(source, ".source")) fputs(app->source.data ? app->source.data : "", stdout);
     else if (!strcmp(source, ".type")) {
         CtType type;
@@ -279,6 +285,8 @@ static void usage(FILE *stream) {
           "  --no-history      Disable persistent history\n"
           "  --max-steps N     Set the execution step limit\n"
           "  --max-depth N     Set the evaluation depth limit (up to 1024)\n"
+          "  --max-nesting N   Set how deep interpret() may nest (up to 64)\n"
+          "  --strict          Raise SIGSEGV on an invalid access instead of diagnosing it\n"
           "  --verbose         Show initialization details\n"
           "  --version         Show version\n"
           "  -h, --help        Show help\n\n"
@@ -296,7 +304,7 @@ static int positive(const char *text, size_t maximum, size_t *result) {
 }
 
 int main(int argc, char **argv) {
-    Application app = {.prompt = "c> ", .steps = 1000000, .depth = 256};
+    Application app = {.prompt = "c> ", .steps = 1000000, .depth = 256, .nesting = 8};
     const char *path = NULL, *source = NULL, *color_mode = "auto";
     int quiet_repl = 0, path_index = 0, no_history = 0;
     for (int i = 1; i < argc; ++i) {
@@ -306,8 +314,10 @@ int main(int argc, char **argv) {
         if (!strcmp(argument, "--no-prompt")) quiet_repl = 1;
         else if (!strcmp(argument, "--no-history")) no_history = 1;
         else if (!strcmp(argument, "--verbose")) app.verbose = 1;
+        else if (!strcmp(argument, "--strict")) app.strict = 1;
         else if ((!strcmp(argument, "-e") || !strcmp(argument, "--prompt") || !strcmp(argument, "--color") ||
-                  !strcmp(argument, "--history") || !strcmp(argument, "--max-steps") || !strcmp(argument, "--max-depth")) && i + 1 < argc) {
+                  !strcmp(argument, "--history") || !strcmp(argument, "--max-steps") ||
+                  !strcmp(argument, "--max-depth") || !strcmp(argument, "--max-nesting")) && i + 1 < argc) {
             const char *value = argv[++i];
             if (!strcmp(argument, "-e")) { if (source) { usage(stderr); return 2; } source = value; }
             else if (!strcmp(argument, "--prompt")) app.prompt = value;
@@ -315,9 +325,10 @@ int main(int argc, char **argv) {
             else if (!strcmp(argument, "--history")) app.history_path = value;
             else {
                 size_t limit;
-                size_t maximum = !strcmp(argument, "--max-depth") ? 1024 : SIZE_MAX;
+                size_t maximum = !strcmp(argument, "--max-depth") ? 1024 : !strcmp(argument, "--max-nesting") ? 64 : SIZE_MAX;
                 if (!positive(value, maximum, &limit)) { fputs("error: invalid execution limit\n", stderr); return 2; }
                 if (!strcmp(argument, "--max-depth")) app.depth = (unsigned)limit;
+                else if (!strcmp(argument, "--max-nesting")) app.nesting = (unsigned)limit;
                 else app.steps = limit;
             }
         } else if (!strcmp(argument, "--") && i + 1 < argc) { path_index = ++i; path = argv[i]; break; }
@@ -345,14 +356,18 @@ int main(int argc, char **argv) {
     CtValue sanity;
     CtError diagnostic;
     int has_value;
-    if (ct_eval(app.interpreter, "2 + 2", &sanity, &has_value, &diagnostic) != CT_OK ||
+    BootCheck check = boot_verify();
+    if (!check.agreed || ct_eval(app.interpreter, "2 + 2", &sanity, &has_value, &diagnostic) != CT_OK ||
         !has_value || sanity.type != CT_INT || sanity.as.integer != 4) {
         fputs("FATAL: Arithmetic has abandoned us. Refusing to enter the void.\n", stderr);
         ct_destroy(app.interpreter);
         return 1;
     }
     ct_set_limits(app.interpreter, app.steps, app.depth);
-    if (app.verbose) fprintf(stderr, "[PASS] 2 + 2 = 4\n[BOOT] The integers have been consulted.\n[BOOT] %zu steps; depth %u.\n", app.steps, app.depth);
+    if (app.verbose)
+        fprintf(stderr, "[PASS] 2 + 2 = 4, confirmed on %s\n[BOOT] The integers have been consulted.\n"
+                        "[BOOT] A nop was executed ceremonially.\n[BOOT] %zu steps; depth %u; nesting %u.\n",
+                check.unit, app.steps, app.depth, app.nesting);
     int status = 0;
     if (source) status = evaluate(&app, source, "<command>", 1, 0) == CT_OK ? 0 : 1;
     else if (!path && (quiet_repl || isatty(STDIN_FILENO))) status = repl(&app, !quiet_repl);
@@ -363,6 +378,7 @@ int main(int argc, char **argv) {
         else if (evaluate(&app, buffer.data ? buffer.data : "", path ? path : "<stdin>", 1, 0) != CT_OK) status = 1;
         else if (ct_exit_status(app.interpreter, &status)) {}
         else if (ct_has_function(app.interpreter, "main")) {
+            ct_set_filename(app.interpreter, path ? path : "<stdin>");
             const char *stdin_name[] = {"<stdin>"};
             const char *const *arguments = path ? (const char *const *)(argv + path_index) : stdin_name;
             int arguments_count = path ? argc - path_index : 1;
