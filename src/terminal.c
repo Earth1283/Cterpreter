@@ -56,7 +56,7 @@ static const char *completion(Terminal *terminal, const char *line, size_t lengt
         if (suffix) return suffix;
     }
     static const char *words[] = {
-        ".help", ".quit", ".clear", ".version", ".type", ".source", ".vars", ".ast", ".load", ".save", ".restore",
+        ".help", ".quit", ".clear", ".version", ".type", ".source", ".vars", ".ast", ".load", ".save", ".restore", ".depth",
         "printf", "puts", "putchar", "getchar", "malloc", "calloc", "realloc", "free", "sizeof", "strlen", "strcmp",
         "strcpy", "memcpy", "memset", "snprintf", "return", "continue", "break", "double", "static", "const", "switch"
     };

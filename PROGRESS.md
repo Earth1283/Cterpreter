@@ -1,5 +1,45 @@
 # Misendeavor log
 
+## 2026-09-21 — Current state: 0.3.0
+
+The interpreter gained a real type system. Types are now interned descriptions in a shared registry rather than an arithmetic encoding of a scalar kind, which made structures, unions, multidimensional arrays, function types, and complex declarators expressible for the first time. On top of that, the full C numeric tower and its conversion rules landed, and the REPL's ghost text, signature hints, and diagnostics now come from the live session instead of a fixed word list.
+
+### New since 0.2.0
+
+- A refcounted global type registry describing every object and function type, with C's layout, alignment, and padding rules, and declarator-syntax type names such as `int (*)(int, char **)`.
+- Structures, unions, nested aggregates, arrays of aggregates, member access through `.` and `->`, and aggregate assignment, arguments, and return values, all copied by value.
+- Multidimensional arrays, arrays of pointers, pointers to arrays, pointers to functions, and the rest of C's declarator grammar, including `typedef` and tag declarations at block scope.
+- Initializer lists with brace elision, designated member and array initializers, string initialization, and compound literals.
+- Function pointers and indirect calls, including `qsort` and `bsearch` calling interpreted comparison functions.
+- `_Bool`, the signed and unsigned char/short/int/long/long long family, and `float`, with the integer promotions and usual arithmetic conversions of C17 6.3.1.1 and 6.3.1.8. Literals take their type from their value and suffix. Unsigned arithmetic wraps; signed overflow is still refused rather than wrapped.
+- `stdbool.h`, `stdint.h`, `float.h`, `assert.h`, and `iso646.h`; the predefined macros, `#pragma once`, `#line`, and `__COUNTER__`; `errno` as an assignable object that library functions actually set; real prototypes for every library function.
+- Nested interpreter instances through `interpret()`, sharing a step budget, with `interpret_depth()`, `.depth`, and `--max-nesting`.
+- `--strict`, which raises the `SIGSEGV` an invalid access would have earned natively after printing the diagnostic.
+- Completions drawn from the session's own globals, macros, and library names; a signature hint for the call the cursor sits inside; and the first diagnostic in the current line, all produced by parsing the input without executing it.
+- The ceremonial `volatile` inline-assembly `nop` and 2 + 2 verification through AVX-512 ZMM lanes or ARM NEON lanes where the host provides them.
+
+### Verification
+
+- 7 CTest checks pass, in both the normal build and the AddressSanitizer/UndefinedBehaviorSanitizer build: core smoke tests, example programs, lexer/parser unit tests, arithmetic boundary tests, fuzzing, reference comparison, and the reproducible-build check.
+- New direct unit tests cover tokens, literal types, escapes, source positions, parse statuses, and AST shape; new arithmetic tests pin promotion, conversion, wraparound, and boundary behavior.
+- Fuzzing feeds generated C fragments and random bytes through a session and requires a diagnostic and a still-usable session, never a crash or a hang. It runs clean across many seeds under sanitizers, and builds as a libFuzzer target with `-DCT_FUZZER=ON`.
+- All 21 successful examples match native GCC-compiled C17 output and exit status byte for byte, now as a CTest check rather than a manual comparison. The three diagnostic examples still produce their intended errors.
+- Two copies of the source tree at different paths produce a byte-identical core archive.
+- The REPL's hints, completions, and live diagnostics were exercised through a pseudo-terminal.
+- The examples collection is now **24 C programs in ten feature folders**: 21 successful programs and three deliberate diagnostic failures. The three new `types` programs cover aggregates, function pointers, and the numeric tower.
+
+### Still unfinished
+
+- Bit-fields, `long double`, complex numbers, `_Atomic`, variable-length arrays, variadic interpreted functions, and `va_list`.
+- `volatile` and `restrict` are parsed and ignored; `extern` declares rather than references. `const` is modelled; the other qualifiers are not.
+- A standalone semantic type checker. Checking still happens largely during execution, so invalid constructs in unexecuted branches can escape it.
+- Accurate original-source locations through includes and macro expansion, and the rest of the C17 preprocessing rules.
+- Real memory snapshots for sessions. Save and restore still replays source and repeats side effects.
+- clangd/LSP integration and the virtual source file it would need; `.asm`, which needs a native backend; a debugger; signal handling; dynamically loaded libraries and native calls; and configurable undefined-behavior policies.
+- Self-interpretation. `interpret()` nests interpreters, but Cterpreter still cannot run its own source, so the whole Cterpreterception section remains open.
+
+The type system was the largest architectural gap in 0.2.0 and it is now closed. What stands between here and the acceptance test is no longer representation but coverage: the interpreter's own source uses features it does not yet implement.
+
 ## 2026-09-20 — Current state: 0.2.0
 
 Cterpreter has grown from an echo loop into a working interpreter for a C subset. It executes its own AST, runs small programs with `main`, and preserves state in a REPL. It does not invoke a compiler to execute user code. The full roadmap, especially self-interpretation, is still unfinished.

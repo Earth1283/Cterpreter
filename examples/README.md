@@ -1,6 +1,6 @@
 # Examples
 
-21 programs, grouped by their main feature. Many deliberately combine several features; the table below lists those connections. Run commands from the repository root after building Cterpreter.
+24 programs, grouped by their main feature. Many deliberately combine several features; the table below lists those connections. Run commands from the repository root after building Cterpreter.
 
 ```sh
 ./build/Cterpreter examples/basics/hello.c Ada
@@ -9,9 +9,12 @@
 ./build/Cterpreter examples/memory/dynamic_vector.c
 ./build/Cterpreter examples/memory/shortest_path.c
 ./build/Cterpreter examples/control_flow/stack_machine.c
+./build/Cterpreter examples/types/aggregates.c
+./build/Cterpreter examples/types/function_pointers.c
+./build/Cterpreter examples/types/numeric_types.c
 ```
 
-For the more involved programs, start with merge sort, N-Queens, the growing vector, shortest paths, or the stack machine. These exercise the current interpreter subset without requiring unsupported structures, function pointers, or multidimensional array declarations.
+For the more involved programs, start with merge sort, N-Queens, the growing vector, shortest paths, or the stack machine. For the type system, start with the aggregate, function-pointer, and numeric-type programs.
 
 ## Program index
 
@@ -32,11 +35,14 @@ For the more involved programs, start with merge sort, N-Queens, the growing vec
 | [strings/run_length.c](strings/run_length.c) | Encoding/decoding, decimal parsing, bounded formatting, buffer checks | Encodes as `a4b3c2d1e5`; round trip `OK` |
 | [preprocessor/macros.c](preprocessor/macros.c) | Local includes, include guards, conditional directives, variadic/nested macros, stringification, token pasting | `answer = 42`; nested expansion 49 |
 | [types/typedefs_generics.c](types/typedefs_generics.c) | Typedefs, enums, `_Generic`, static locals, `sizeof`, `_Alignof` | Numeric/text type selection; IDs 101 and 102 |
+| [types/aggregates.c](types/aggregates.c) | Nested structures, unions, arrays of structures, struct copies and returns, designated and elided initializers, multidimensional arrays, `->` | Length squared 25; grid total 45 in 48 bytes; `sparse first (0, 0) last (7, 8)` |
+| [types/function_pointers.c](types/function_pointers.c) | Function pointers in structures, indirect calls, pointer-to-function parameters, `qsort` and `bsearch` with interpreted comparators | `mul -> 24`; descending `88 42 23 19 7 3`; `found 19 at index 3` |
+| [types/numeric_types.c](types/numeric_types.c) | The whole numeric tower, integer promotions, usual arithmetic conversions, unsigned wraparound, signed/unsigned comparison, `float` versus `double`, shifts and masks, `limits.h`, `stdint.h`, `stdbool.h` | `sizes 1 1 2 4 8 8 4 8`; `unsigned wraps to 4294967295 and back to 0`; `mask deadbeef rotated beefdead` |
 | [io/csv_report.c](io/csv_report.c) | `fopen`, `fgets`, `sscanf`, account aggregation, floating-point formatting | 6 transactions, 3 accounts, total 125.00 |
 | [io/file_roundtrip.c](io/file_roundtrip.c) | Exclusive file creation, block I/O, flushing/seeking, `memcmp`, cleanup via `goto` | Restores five integers with checksum 131; removes its file |
 | [io/calculator.c](io/calculator.c) | Formatted stdin, `switch`, EOF, recoverable division-by-zero handling | Prints results for supplied calculations |
 
-The graph is stored in one flat array using `row * NODES + column`. The vector uses separate pointer, length, and capacity variables. Neither example depends on unimplemented aggregate types.
+The graph is stored in one flat array using `row * NODES + column`, and the vector uses separate pointer, length, and capacity variables; both predate aggregate support and still run unchanged. The `types` programs use structures and multidimensional arrays directly.
 
 ## Inputs and files
 
@@ -85,4 +91,4 @@ These three programs are expected to fail with exit status 1. They demonstrate C
 
 ## Verification
 
-The 18 successful programs were compiled as C17 with GCC on Linux and their stdout, stderr, and exit statuses compared against Cterpreter using the documented sample inputs. All matched. The three diagnostic examples produced their expected errors. These examples demonstrate supported behavior; they do not establish full C17 conformance.
+The 21 successful programs were compiled as C17 with GCC on Linux and their stdout, stderr, and exit statuses compared against Cterpreter using the documented sample inputs. All matched byte for byte. The three diagnostic examples produced their expected errors. The comparison runs as the `reference_programs` CTest check, so it is repeated on every test run. These examples demonstrate supported behavior; they do not establish full C17 conformance.
