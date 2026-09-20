@@ -50,7 +50,11 @@ void terminal_init(Terminal *terminal, const char *history_path, int color) {
     fclose(file);
 }
 
-static const char *completion(const char *line, size_t length) {
+static const char *completion(Terminal *terminal, const char *line, size_t length) {
+    if (terminal->complete) {
+        const char *suffix = terminal->complete(terminal->session, line, length);
+        if (suffix) return suffix;
+    }
     static const char *words[] = {
         ".help", ".quit", ".clear", ".version", ".type", ".source", ".vars", ".ast", ".load", ".save", ".restore",
         "printf", "puts", "putchar", "getchar", "malloc", "calloc", "realloc", "free", "sizeof", "strlen", "strcmp",
@@ -65,7 +69,7 @@ static const char *completion(const char *line, size_t length) {
     return NULL;
 }
 
-static void render(Terminal *terminal, const char *prompt, const char *line, size_t length, size_t cursor) {
+static void render(Terminal *terminal, const char *prompt, const char *line, size_t length, size_t cursor, int status) {
     fputs("\r\033[2K", stdout);
     if (terminal->color) fputs("\033[36m", stdout);
     fputs(prompt, stdout);
@@ -83,14 +87,19 @@ static void render(Terminal *terminal, const char *prompt, const char *line, siz
         if (terminal->color && !quoted) fputs("\033[0m", stdout);
     }
     if (terminal->color) fputs("\033[0m", stdout);
-    size_t ghost = 0;
-    const char *suggestion = cursor == length ? completion(line, length) : NULL;
-    if (suggestion && terminal->color) {
-        ghost = strlen(suggestion);
-        fprintf(stdout, "\033[90m%s\033[0m", suggestion);
+    const char *suggestion = cursor == length ? completion(terminal, line, length) : NULL;
+    if (suggestion && terminal->color) fprintf(stdout, "\033[90m%s\033[0m", suggestion);
+    const char *note = status && terminal->hint ? terminal->hint(terminal->session, line, cursor) : NULL;
+    fputs("\n\033[2K", stdout);
+    if (note) {
+        if (terminal->color) fputs("\033[90m", stdout);
+        for (const char *cursor_note = note; *cursor_note && cursor_note - note < 200; ++cursor_note)
+            fputc(*cursor_note >= 32 && *cursor_note != 127 ? *cursor_note : ' ', stdout);
+        if (terminal->color) fputs("\033[0m", stdout);
     }
-    size_t back = length - cursor + ghost;
-    if (back) fprintf(stdout, "\033[%zuD", back);
+    fputs("\033[A\r", stdout);
+    size_t column = strlen(prompt) + cursor;
+    if (column) fprintf(stdout, "\033[%zuC", column);
     fflush(stdout);
 }
 
@@ -127,7 +136,7 @@ char *terminal_read(Terminal *terminal, const char *prompt, const volatile sig_a
     size_t length = 0, cursor = 0, history = terminal->count;
     char *draft = NULL;
     int accepted = 0;
-    if (line) render(terminal, prompt, line, length, cursor);
+    if (line) render(terminal, prompt, line, length, cursor, 1);
     while (line && !*interrupted) {
         int byte = read_byte(interrupted);
         if (byte < 0) break;
@@ -153,7 +162,7 @@ char *terminal_read(Terminal *terminal, const char *prompt, const volatile sig_a
             memmove(line + cursor, line + cursor + 1, length - cursor);
             --length;
         } else if (byte == 9 && cursor == length) {
-            const char *suffix = completion(line, length);
+            const char *suffix = completion(terminal, line, length);
             if (suffix && strlen(suffix) <= CT_SOURCE_LIMIT - length) {
                 strcpy(line + length, suffix);
                 length += strlen(suffix);
@@ -200,13 +209,15 @@ char *terminal_read(Terminal *terminal, const char *prompt, const volatile sig_a
             line[cursor++] = (char)byte;
             ++length;
         }
-        render(terminal, prompt, line, length, cursor);
+        render(terminal, prompt, line, length, cursor, 1);
     }
     (void)tcsetattr(STDIN_FILENO, TCSANOW, &saved);
     if (line) {
         int color = terminal->color;
         terminal->color = 0;
-        render(terminal, prompt, line, length, length);
+        render(terminal, prompt, line, length, length, 0);
+        fputs("\r\033[B\033[2K\033[A\r", stdout);
+        if (strlen(prompt) + length) fprintf(stdout, "\033[%zuC", strlen(prompt) + length);
         terminal->color = color;
     }
     fputc('\n', stdout);

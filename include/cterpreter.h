@@ -40,6 +40,13 @@ CtStatus ct_run_main(CtInterpreter *interpreter, int argc, const char *const *ar
 CtStatus ct_inspect_type(CtInterpreter *interpreter, const char *source, CtType *type, CtError *error);
 CtStatus ct_dump_ast(CtInterpreter *interpreter, const char *source, FILE *output, CtError *error);
 void ct_dump(CtInterpreter *interpreter, FILE *output);
+/* Parse the source without executing it, for diagnostics while typing. */
+CtStatus ct_check(CtInterpreter *interpreter, const char *source, CtError *error);
+/* Write the declaration of a session function or library function. */
+int ct_signature(CtInterpreter *interpreter, const char *name, size_t length, char *buffer, size_t capacity);
+/* Write the index-th known name starting with the prefix. */
+int ct_complete(CtInterpreter *interpreter, const char *prefix, size_t length, size_t index,
+                char *buffer, size_t capacity);
 void ct_type_name(CtType type, char *buffer, size_t capacity);
 size_t ct_type_size(CtType type);
 /* Parse the entire submission before executing. Incomplete/invalid syntax does

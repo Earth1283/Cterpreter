@@ -1417,6 +1417,63 @@ CtStatus ct_inspect_type(CtInterpreter *interpreter, const char *source, CtType 
     return interpreter->failed ? CT_ERROR : CT_OK;
 }
 
+/* Parses without executing, which is what the prompt needs for live diagnostics. */
+CtStatus ct_check(CtInterpreter *interpreter, const char *source, CtError *error) {
+    Unit *unit = NULL;
+    CtStatus status = inspection_parse(interpreter, source, &unit, error);
+    unit_destroy(unit);
+    return status;
+}
+
+int ct_signature(CtInterpreter *interpreter, const char *name, size_t length, char *buffer, size_t capacity) {
+    Token token = {.kind = TK_NAME, .start = name, .length = length};
+    Symbol *symbol = lookup(&interpreter->globals, token, 1);
+    if (symbol && type_is_function(symbol->value.type)) {
+        const TypeInfo *signature = type_info(symbol->value.type);
+        char returns[96], parameter[96];
+        ct_type_name(type_target(symbol->value.type), returns, sizeof returns);
+        size_t used = (size_t)snprintf(buffer, capacity, "%s %.*s(", returns, (int)length, name);
+        for (size_t i = 0; i < signature->parameter_count && used + 1 < capacity; ++i) {
+            ct_type_name(signature->parameters[i], parameter, sizeof parameter);
+            used += (size_t)snprintf(buffer + used, capacity - used, "%s%s", i ? ", " : "", parameter);
+        }
+        if (used + 1 < capacity && signature->variadic)
+            used += (size_t)snprintf(buffer + used, capacity - used, signature->parameter_count ? ", ..." : "...");
+        else if (used + 1 < capacity && !signature->parameter_count)
+            used += (size_t)snprintf(buffer + used, capacity - used, "void");
+        if (used + 1 < capacity) (void)snprintf(buffer + used, capacity - used, ")");
+        return 1;
+    }
+    if (symbol) return 0;
+    return builtin_prototype(token, buffer, capacity);
+}
+
+/* Enumerates everything the session knows by name: symbols, macros and the library. */
+int ct_complete(CtInterpreter *interpreter, const char *prefix, size_t length, size_t index,
+                char *buffer, size_t capacity) {
+    for (Symbol *symbol = interpreter->globals.symbols; symbol; symbol = symbol->next)
+        if (symbol->length > length && !memcmp(symbol->name, prefix, length) && !index--) {
+            (void)snprintf(buffer, capacity, "%s", symbol->name);
+            return 1;
+        }
+    for (size_t i = 0; ; ++i) {
+        const char *macro = preprocessor_macro_name(&interpreter->preprocessor, i);
+        if (!macro) break;
+        if (strlen(macro) > length && !memcmp(macro, prefix, length) && !index--) {
+            (void)snprintf(buffer, capacity, "%s", macro);
+            return 1;
+        }
+    }
+    for (size_t i = 0; i < builtin_count(); ++i) {
+        const char *name = builtin_name(i);
+        if (strlen(name) > length && !memcmp(name, prefix, length) && !index--) {
+            (void)snprintf(buffer, capacity, "%s", name);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 void ct_dump(CtInterpreter *interpreter, FILE *output) {
     for (Symbol *symbol = interpreter->globals.symbols; symbol; symbol = symbol->next) {
         char type[128], value[256];

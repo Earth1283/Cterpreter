@@ -23,5 +23,6 @@ int preprocess(Preprocessor *preprocessor, const char *source, const char *filen
                char **output, CtError *error);
 void preprocessor_destroy(Preprocessor *preprocessor);
 int preprocessor_copy(Preprocessor *target, const Preprocessor *source);
+const char *preprocessor_macro_name(const Preprocessor *preprocessor, size_t index);
 
 #endif

@@ -112,8 +112,8 @@ static CtStatus evaluate(Application *app, const char *source, const char *name,
     ct_set_filename(app->interpreter, NULL);
     if (status == CT_ERROR || (status == CT_INCOMPLETE && final)) print_error(app, name, &error, source);
     if (status == CT_OK && has_value) {
-        char formatted[128];
-        ct_format_value(value, formatted, sizeof formatted);
+        char formatted[512];
+        ct_print_value(app->interpreter, value, formatted, sizeof formatted);
         puts(formatted);
     }
     if (status == CT_OK && remember && *source) {
@@ -177,7 +177,10 @@ static int command(Application *app, char *source) {
              ".restore FILE      Replay source into a fresh session\n"
              ".depth             Show the interpreter's own nesting level\n\n"
              "Arrows edit or recall history. Ctrl+R searches history using the current text.\n"
-             "Tab accepts a suggestion. Ctrl+C cancels input or execution. Ctrl+D exits.");
+             "Tab accepts a suggestion drawn from the session's own names.\n"
+             "The line below the prompt shows the signature of the call you are inside,\n"
+             "or the first diagnostic in what you have typed so far.\n"
+             "Ctrl+C cancels input or execution. Ctrl+D exits.");
     } else if (!strcmp(source, ".vars") || !strcmp(source, ".dump")) ct_dump(app->interpreter, stdout);
     else if (!strcmp(source, ".depth")) printf("Interpreter nesting level %u\n", ct_depth(app->interpreter));
     else if (!strcmp(source, ".source")) fputs(app->source.data ? app->source.data : "", stdout);
@@ -226,12 +229,61 @@ static int command(Application *app, char *source) {
     return 1;
 }
 
+/* The identifier naming the call the cursor sits inside, if there is one. */
+static size_t enclosing_call(const char *line, size_t cursor, size_t *length) {
+    size_t depth = 0;
+    for (size_t i = cursor; i > 0; --i) {
+        char c = line[i - 1];
+        if (c == ')') ++depth;
+        else if (c == '(') {
+            if (depth) { --depth; continue; }
+            size_t end = i - 1;
+            while (end && isspace((unsigned char)line[end - 1])) --end;
+            size_t start = end;
+            while (start && (isalnum((unsigned char)line[start - 1]) || line[start - 1] == '_')) --start;
+            if (start == end || isdigit((unsigned char)line[start])) return SIZE_MAX;
+            *length = end - start;
+            return start;
+        }
+    }
+    return SIZE_MAX;
+}
+
+static const char *session_hint(void *session, const char *line, size_t cursor) {
+    static char note[256];
+    Application *app = session;
+    size_t length = 0;
+    size_t start = enclosing_call(line, cursor, &length);
+    if (start != SIZE_MAX && ct_signature(app->interpreter, line + start, length, note, sizeof note)) return note;
+    while (*line && isspace((unsigned char)*line)) ++line;
+    if (!*line || *line == '.' || !strchr(line, ';')) return NULL;
+    CtError error;
+    if (ct_check(app->interpreter, line, &error) != CT_ERROR) return NULL;
+    (void)snprintf(note, sizeof note, "%zu:%zu: %s", error.line, error.column, error.message);
+    return note;
+}
+
+static const char *session_completion(void *session, const char *line, size_t cursor) {
+    static char name[128];
+    Application *app = session;
+    size_t start = cursor;
+    while (start && (isalnum((unsigned char)line[start - 1]) || line[start - 1] == '_')) --start;
+    size_t prefix = cursor - start;
+    if (!prefix || isdigit((unsigned char)line[start])) return NULL;
+    if (start && (line[start - 1] == '.' || line[start - 1] == '>')) return NULL;
+    if (!ct_complete(app->interpreter, line + start, prefix, 0, name, sizeof name)) return NULL;
+    return name + prefix;
+}
+
 static int repl(Application *app, int prompts) {
     Buffer buffer = {0};
     Terminal terminal;
     int editing = prompts && isatty(STDIN_FILENO) && isatty(STDOUT_FILENO) &&
                   (!getenv("TERM") || strcmp(getenv("TERM"), "dumb"));
     terminal_init(&terminal, editing ? app->history_path : NULL, app->color);
+    terminal.session = app;
+    terminal.hint = session_hint;
+    terminal.complete = session_completion;
     if (prompts) {
         if (app->color) fputs("\033[1;36m", stdout);
         printf("Cterpreter %s", CT_VERSION);

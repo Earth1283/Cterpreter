@@ -129,6 +129,12 @@ failed:
     return 0;
 }
 
+const char *preprocessor_macro_name(const Preprocessor *preprocessor, size_t index) {
+    for (Macro *macro = preprocessor->macros; macro; macro = macro->next)
+        if (!index--) return macro->name;
+    return NULL;
+}
+
 static const char *quoted_end(const char *text) {
     char quote = *text++;
     while (*text && *text != quote) {

@@ -9,6 +9,10 @@ typedef struct {
     size_t count;
     const char *history_path;
     int color;
+    /* Supplied by the host so that hints and completions come from the live session. */
+    void *session;
+    const char *(*hint)(void *session, const char *line, size_t cursor);
+    const char *(*complete)(void *session, const char *line, size_t cursor);
 } Terminal;
 
 void terminal_init(Terminal *terminal, const char *history_path, int color);
