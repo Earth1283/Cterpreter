@@ -8,7 +8,8 @@ typedef struct {
     char **history;
     size_t count;
     const char *history_path;
-    int color;
+    int color, highlighting, suggestions;
+    const char *context;
     /* Supplied by the host so that hints and completions come from the live session. */
     void *session;
     const char *(*hint)(void *session, const char *line, size_t cursor);

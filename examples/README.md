@@ -1,6 +1,6 @@
 # Examples
 
-30 programs, grouped by their main feature. Many deliberately combine several features; the table below lists those connections. Run commands from the repository root after building Cterpreter.
+31 programs, grouped by their main feature. Many deliberately combine several features; the table below lists those connections. Run commands from the repository root after building Cterpreter.
 
 ```sh
 ./build/Cterpreter examples/basics/hello.c Ada
@@ -12,6 +12,7 @@
 ./build/Cterpreter examples/types/aggregates.c
 ./build/Cterpreter examples/types/function_pointers.c
 ./build/Cterpreter examples/types/numeric_types.c
+./build/Cterpreter examples/types/variadic.c
 ./build/Cterpreter --max-steps 900000000 examples/playground/donut.c
 ```
 
@@ -39,6 +40,7 @@ For the more involved programs, start with merge sort, N-Queens, the growing vec
 | [types/aggregates.c](types/aggregates.c) | Nested structures, unions, arrays of structures, struct copies and returns, designated and elided initializers, multidimensional arrays, `->` | Length squared 25; grid total 45 in 48 bytes; `sparse first (0, 0) last (7, 8)` |
 | [types/function_pointers.c](types/function_pointers.c) | Function pointers in structures, indirect calls, pointer-to-function parameters, `qsort` and `bsearch` with interpreted comparators | `mul -> 24`; descending `88 42 23 19 7 3`; `found 19 at index 3` |
 | [types/numeric_types.c](types/numeric_types.c) | The whole numeric tower, integer promotions, usual arithmetic conversions, unsigned wraparound, signed/unsigned comparison, `float` versus `double`, shifts and masks, `limits.h`, `stdint.h`, `stdbool.h` | `sizes 1 1 2 4 8 8 4 8`; `unsigned wraps to 4294967295 and back to 0`; `mask deadbeef rotated beefdead` |
+| [types/variadic.c](types/variadic.c) | Variadic function pointers, integer/float promotions, `va_list`, `va_copy`, formatting in two passes, `vsscanf`, aggregate arguments and returns | `sum = 42`; `promoted float: 1.25 / 42`; `scan = 3: 42 2.5 arguments`; `points = (7, 11)` |
 | [io/csv_report.c](io/csv_report.c) | `fopen`, `fgets`, `sscanf`, account aggregation, floating-point formatting | 6 transactions, 3 accounts, total 125.00 |
 | [io/file_roundtrip.c](io/file_roundtrip.c) | Exclusive file creation, block I/O, flushing/seeking, `memcmp`, cleanup via `goto` | Restores five integers with checksum 131; removes its file |
 | [io/calculator.c](io/calculator.c) | Formatted stdin, `switch`, EOF, recoverable division-by-zero handling | Prints results for supplied calculations |

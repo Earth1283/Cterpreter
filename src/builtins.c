@@ -40,6 +40,13 @@ static const struct { const char *name; ReturnKind type; unsigned char arity; co
     {"scanf", RT_INT, VARIADIC, "const char *format, ..."},
     {"sscanf", RT_INT, VARIADIC, "const char *text, const char *format, ..."},
     {"fscanf", RT_INT, VARIADIC, "FILE *stream, const char *format, ..."},
+    {"vprintf", RT_INT, 2, "const char *format, va_list args"},
+    {"vsprintf", RT_INT, 3, "char *buffer, const char *format, va_list args"},
+    {"vsnprintf", RT_INT, 4, "char *buffer, size_t size, const char *format, va_list args"},
+    {"vfprintf", RT_INT, 3, "FILE *stream, const char *format, va_list args"},
+    {"vscanf", RT_INT, 2, "const char *format, va_list args"},
+    {"vsscanf", RT_INT, 3, "const char *text, const char *format, va_list args"},
+    {"vfscanf", RT_INT, 3, "FILE *stream, const char *format, va_list args"},
     {"puts", RT_INT, 1, "const char *text"},
     {"putchar", RT_INT, 1, "int character"},
     {"getchar", RT_INT, 0, "void"},
@@ -827,7 +834,30 @@ static CtValue interpret(CtInterpreter *interpreter, Token name, CtValue argumen
     return integer(status);
 }
 
+static CtValue va_formatted(CtInterpreter *interpreter, Token name, const CtValue *args, size_t count) {
+    if (!require_count(interpreter, name, count)) return integer(0);
+    const CtValue *remaining = NULL;
+    size_t extra = 0, fixed = count - 1;
+    if (!runtime_va_values(interpreter, name, args[fixed], &remaining, &extra)) return integer(0);
+    CtValue *values = malloc((fixed + extra) * sizeof *values);
+    if (!values) return runtime_error(interpreter, name, "out of memory");
+    memcpy(values, args, fixed * sizeof *values);
+    if (extra) memcpy(values + fixed, remaining, extra * sizeof *values);
+    /* Reuse the checked format engines; host va_list/host addresses never cross
+     * into interpreted memory. Dropping the leading v selects the base routine. */
+    Token base = name;
+    ++base.start;
+    --base.length;
+    int input = named(base, "scanf") || named(base, "sscanf") || named(base, "fscanf");
+    CtValue result = input ? scanned(interpreter, base, values, fixed + extra)
+                           : formatted(interpreter, base, values, fixed + extra);
+    free(values);
+    return result;
+}
+
 CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args, size_t count) {
+    if (named(name, "vprintf") || named(name, "vsprintf") || named(name, "vsnprintf") || named(name, "vfprintf") ||
+        named(name, "vscanf") || named(name, "vsscanf") || named(name, "vfscanf")) return va_formatted(interpreter, name, args, count);
     if (named(name, "printf") || named(name, "sprintf") || named(name, "snprintf") || named(name, "fprintf")) return formatted(interpreter, name, args, count);
     if (named(name, "scanf") || named(name, "sscanf") || named(name, "fscanf")) return scanned(interpreter, name, args, count);
     if (named(name, "fopen") || named(name, "fclose") || named(name, "fflush") || named(name, "fgetc") ||

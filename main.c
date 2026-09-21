@@ -3,6 +3,7 @@
 #include "cterpreter.h"
 #include "boot.h"
 #include "terminal.h"
+#include "config.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -21,10 +22,33 @@ typedef struct {
     CtInterpreter *interpreter;
     Buffer source;
     const char *prompt, *history_path;
+    const char *config_path, *pending_source;
+    CliConfig config;
     size_t steps;
     unsigned depth, nesting;
-    int color, verbose, strict;
+    int color, verbose, strict, in_repl;
 } Application;
+
+static void update_color(Application *app) {
+    int mode = app->config.values[CFG_COLOR];
+    app->color = mode == 1 || (mode == 0 && isatty(STDOUT_FILENO) && !getenv("NO_COLOR") &&
+                              (!getenv("TERM") || strcmp(getenv("TERM"), "dumb")));
+}
+
+static const char *syntax_tip(const char *message) {
+    if (strstr(message, "expected ';'")) return "End the statement with a semicolon: int count = 3;";
+    if (strstr(message, "expected ')'")) return "Close the parentheses before continuing: if (ready) { ... }";
+    if (strstr(message, "expected '}'")) return "Close the block or initializer with a matching }.";
+    if (strstr(message, "expected ']'")) return "Close the array subscript with ]: values[index].";
+    if (strstr(message, "expected an expression")) return "An operator needs a value on each side: total = count + 1;";
+    if (strstr(message, "expected a name")) return "Put a variable name after its type: int count = 3;";
+    if (strstr(message, "expected a type")) return "Start a declaration with a type such as int, double, or char *.";
+    if (strstr(message, "unterminated string")) return "Close the string with a double quote; write \\n for a newline.";
+    if (strstr(message, "return outside")) return "Use return inside a function; a bare REPL expression prints its value.";
+    if (strstr(message, "unknown variable") || strstr(message, "unknown name"))
+        return "Check the spelling or declare the name first. .vars lists your session's globals.";
+    return NULL;
+}
 
 static void handle_interrupt(int signal_number) {
     (void)signal_number;
@@ -88,6 +112,8 @@ static void print_error(Application *app, const char *name, const CtError *error
     if (color) fputs("\033[31m", stderr);
     fprintf(stderr, "%s:%zu:%zu: error: %s\n", name, error->line, error->column, error->message);
     if (color) fputs("\033[0m", stderr);
+    const char *tip = app->in_repl && app->config.values[CFG_TIPS] ? syntax_tip(error->message) : NULL;
+    if (tip) fprintf(stderr, "  tip: %s\n", tip);
     if (!source || strchr(source, '#')) return;
     const char *line = source;
     for (size_t number = 1; number < error->line && *line; ++number) {
@@ -146,6 +172,55 @@ static CtInterpreter *create_interpreter(Application *app) {
     return interpreter;
 }
 
+static void configure(Application *app, char *argument) {
+    char *value = argument;
+    while (*value && !isspace((unsigned char)*value)) ++value;
+    if (*value) *value++ = '\0';
+    while (isspace((unsigned char)*value)) ++value;
+    if (!*argument || !strcmp(argument, "help")) {
+        if (*value) { fputs("Usage: .config [name [on|off|toggle]] | save | reset\n", stderr); return; }
+        if (app->color) fputs("\033[1;36m", stdout);
+        puts("\n  CLI preferences");
+        if (app->color) fputs("\033[0m", stdout);
+        for (int i = 0; i < CFG_COUNT; ++i) {
+            printf("  %-14s ", config_name(i));
+            if (app->color) fputs(app->config.values[i] || i == CFG_COLOR ? "\033[36m" : "\033[90m", stdout);
+            printf("%-7s", config_value(&app->config, i));
+            if (app->color) fputs("\033[0m", stdout);
+            printf(" %s\n", config_description(i));
+        }
+        puts("\n  .config tips off       Change a setting now\n"
+             "  .config color auto     auto / always / never\n"
+             "  .config reset          Restore defaults for this session\n"
+             "  .config save           Keep preferences for future sessions");
+        if (app->config_path) printf("  File: %s\n", app->config_path);
+        if (!app->color) puts("  Highlighting uses color; auto respects NO_COLOR and terminal support.");
+        putchar('\n');
+        return;
+    }
+    if (!strcmp(argument, "save") || !strcmp(argument, "reset")) {
+        if (*value) { fputs("error: save and reset take no arguments\n", stderr); return; }
+        if (!strcmp(argument, "reset")) {
+            config_defaults(&app->config);
+            update_color(app);
+            puts("CLI preferences reset for this session. Use .config save to keep them.");
+        } else if (!app->config_path) fputs("error: no config path; set HOME or launch with --config FILE\n", stderr);
+        else if (config_save(&app->config, app->config_path)) printf("Saved CLI preferences to %s\n", app->config_path);
+        return;
+    }
+    int index = config_index(argument);
+    if (index < 0) { fprintf(stderr, "error: unknown setting '%s'; use .config to list settings\n", argument); return; }
+    if (*value) {
+        if (!strcmp(value, "toggle") && index != CFG_COLOR) app->config.values[index] = !app->config.values[index];
+        else if (!config_set(&app->config, argument, value)) {
+            fprintf(stderr, "error: %s expects %s\n", argument, index == CFG_COLOR ? "auto, always, or never" : "on, off, or toggle");
+            return;
+        }
+        update_color(app);
+    }
+    printf("%s = %s\n", config_name(index), config_value(&app->config, index));
+}
+
 static int command(Application *app, char *source) {
     while (isspace((unsigned char)*source)) ++source;
     if (*source != '.' || isdigit((unsigned char)source[1])) return 0;
@@ -156,7 +231,8 @@ static int command(Application *app, char *source) {
     if (*argument) *argument++ = '\0';
     while (isspace((unsigned char)*argument)) ++argument;
     if (!strcmp(source, ".quit")) return 2;
-    if (!strcmp(source, ".version")) puts("Cterpreter " CT_VERSION);
+    if (!strcmp(source, ".config")) configure(app, argument);
+    else if (!strcmp(source, ".version")) puts("Cterpreter " CT_VERSION);
     else if (!strcmp(source, ".clear")) {
         ct_clear(app->interpreter);
         reset(&app->source);
@@ -165,6 +241,7 @@ static int command(Application *app, char *source) {
         puts("C source: expressions, declarations, functions, pointers, arrays, and standard I/O.\n"
              "End a statement with ';' to suppress its expression result.\n\n"
              ".help              Show help\n"
+             ".config            Show or change CLI preferences\n"
              ".quit              Exit\n"
              ".clear             Reset variables, functions, macros, and memory\n"
              ".version           Show version\n"
@@ -231,20 +308,38 @@ static int command(Application *app, char *source) {
 
 /* The identifier naming the call the cursor sits inside, if there is one. */
 static size_t enclosing_call(const char *line, size_t cursor, size_t *length) {
-    size_t depth = 0;
-    for (size_t i = cursor; i > 0; --i) {
-        char c = line[i - 1];
-        if (c == ')') ++depth;
-        else if (c == '(') {
-            if (depth) { --depth; continue; }
-            size_t end = i - 1;
-            while (end && isspace((unsigned char)line[end - 1])) --end;
-            size_t start = end;
-            while (start && (isalnum((unsigned char)line[start - 1]) || line[start - 1] == '_')) --start;
-            if (start == end || isdigit((unsigned char)line[start])) return SIZE_MAX;
-            *length = end - start;
-            return start;
+    size_t openings[128], depth = 0;
+    int quote = 0, comment = 0;
+    for (size_t i = 0; i < cursor; ++i) {
+        char c = line[i];
+        if (comment == 1) { if (c == '\n') comment = 0; continue; }
+        if (comment == 2) {
+            if (c == '*' && i + 1 < cursor && line[i + 1] == '/') { comment = 0; ++i; }
+            continue;
         }
+        if (quote) {
+            if (c == '\\' && i + 1 < cursor) ++i;
+            else if (c == quote) quote = 0;
+            continue;
+        }
+        if (c == '"' || c == '\'') { quote = c; continue; }
+        if (c == '/' && i + 1 < cursor && (line[i + 1] == '/' || line[i + 1] == '*')) {
+            comment = line[++i] == '/' ? 1 : 2;
+            continue;
+        }
+        if (c == '(') {
+            if (depth == sizeof openings / sizeof openings[0]) return SIZE_MAX;
+            openings[depth++] = i;
+        } else if (c == ')' && depth) --depth;
+    }
+    while (depth) {
+        size_t end = openings[--depth];
+        while (end && isspace((unsigned char)line[end - 1])) --end;
+        size_t start = end;
+        while (start && (isalnum((unsigned char)line[start - 1]) || line[start - 1] == '_')) --start;
+        if (start == end || isdigit((unsigned char)line[start])) continue;
+        *length = end - start;
+        return start;
     }
     return SIZE_MAX;
 }
@@ -252,20 +347,83 @@ static size_t enclosing_call(const char *line, size_t cursor, size_t *length) {
 static const char *session_hint(void *session, const char *line, size_t cursor) {
     static char note[256];
     Application *app = session;
-    size_t length = 0;
-    size_t start = enclosing_call(line, cursor, &length);
-    if (start != SIZE_MAX && ct_signature(app->interpreter, line + start, length, note, sizeof note)) return note;
-    while (*line && isspace((unsigned char)*line)) ++line;
-    if (!*line || *line == '.' || !strchr(line, ';')) return NULL;
+    const char *trimmed = line;
+    while (isspace((unsigned char)*trimmed)) ++trimmed;
+    if (*trimmed == '.' && !isdigit((unsigned char)trimmed[1]))
+        return app->config.values[CFG_TIPS] ? "config | .config lists preferences; .config tips off hides syntax tips" : NULL;
+    Buffer input = {0};
+    if ((app->pending_source && !append_text(&input, app->pending_source)) || !append_text(&input, line)) {
+        free(input.data);
+        return NULL;
+    }
+    const char *text = input.data ? input.data : "";
+    const char *result = NULL;
     CtError error;
-    if (ct_check(app->interpreter, line, &error) != CT_ERROR) return NULL;
-    (void)snprintf(note, sizeof note, "%zu:%zu: %s", error.line, error.column, error.message);
-    return note;
+    if (app->config.values[CFG_DIAGNOSTICS] && strpbrk(line, ";}") && ct_check(app->interpreter, text, &error) == CT_ERROR) {
+        const char *tip = app->config.values[CFG_TIPS] ? syntax_tip(error.message) : NULL;
+        (void)snprintf(note, sizeof note, "%s | %s", tip ? "tip" : "syntax", tip ? tip : error.message);
+        result = note;
+    }
+    if (!result && app->config.values[CFG_SIGNATURES]) {
+        size_t length = 0;
+        size_t start = enclosing_call(text, cursor + (app->pending_source ? strlen(app->pending_source) : 0), &length);
+        if (start != SIZE_MAX && ct_signature(app->interpreter, text + start, length, note + 7, sizeof note - 7)) {
+            memcpy(note, "call | ", 7);
+            result = note;
+        }
+    }
+    if (!result && app->config.values[CFG_TIPS]) {
+        if (!strncmp(trimmed, "for", 3) && !isalnum((unsigned char)trimmed[3]) && trimmed[3] != '_')
+            result = "tip | for (int i = 0; i < count; ++i) { ... }";
+        else if (!strncmp(trimmed, "if", 2) && !isalnum((unsigned char)trimmed[2]) && trimmed[2] != '_')
+            result = "tip | if (condition) { ... } else { ... }";
+        else if (!strncmp(trimmed, "while", 5) && !isalnum((unsigned char)trimmed[5]) && trimmed[5] != '_')
+            result = "tip | while (condition) { ... }";
+        else if (app->pending_source && *app->pending_source)
+            result = "tip | Continue your statement or block. Ctrl+C cancels the unfinished input.";
+        else if (*trimmed)
+            result = "tip | End a statement with ; to hide its result. Leave it off to print a value.";
+        else result = "ready | .help for commands   .config for preferences";
+    }
+    free(input.data);
+    return result;
 }
 
 static const char *session_completion(void *session, const char *line, size_t cursor) {
     static char name[128];
     Application *app = session;
+    size_t command_start = 0;
+    while (command_start < cursor && isspace((unsigned char)line[command_start])) ++command_start;
+    if (cursor >= command_start + 8 && !memcmp(line + command_start, ".config", 7) &&
+        isspace((unsigned char)line[command_start + 7])) {
+        size_t key = command_start + 8;
+        while (key < cursor && isspace((unsigned char)line[key])) ++key;
+        size_t end = key;
+        while (end < cursor && !isspace((unsigned char)line[end])) ++end;
+        const char *choices[CFG_COUNT + 3];
+        size_t count = 0, prefix_start = key;
+        if (end == cursor) {
+            for (int i = 0; i < CFG_COUNT; ++i) choices[count++] = config_name(i);
+            choices[count++] = "save";
+            choices[count++] = "reset";
+            choices[count++] = "help";
+        } else {
+            if (end - key >= sizeof name) return NULL;
+            memcpy(name, line + key, end - key);
+            name[end - key] = '\0';
+            int index = config_index(name);
+            if (index < 0) return NULL;
+            prefix_start = end;
+            while (prefix_start < cursor && isspace((unsigned char)line[prefix_start])) ++prefix_start;
+            choices[count++] = index == CFG_COLOR ? "auto" : "on";
+            choices[count++] = index == CFG_COLOR ? "always" : "off";
+            choices[count++] = index == CFG_COLOR ? "never" : "toggle";
+        }
+        size_t prefix = cursor - prefix_start;
+        for (size_t i = 0; i < count; ++i)
+            if (strlen(choices[i]) > prefix && !memcmp(line + prefix_start, choices[i], prefix)) return choices[i] + prefix;
+        return NULL;
+    }
     size_t start = cursor;
     while (start && (isalnum((unsigned char)line[start - 1]) || line[start - 1] == '_')) --start;
     size_t prefix = cursor - start;
@@ -284,18 +442,29 @@ static int repl(Application *app, int prompts) {
     terminal.session = app;
     terminal.hint = session_hint;
     terminal.complete = session_completion;
+    app->in_repl = 1;
     if (prompts) {
+        putchar('\n');
         if (app->color) fputs("\033[1;36m", stdout);
-        printf("Cterpreter %s", CT_VERSION);
+        printf("  Cterpreter  %s\n", CT_VERSION);
         if (app->color) fputs("\033[0m", stdout);
-        puts("  •  C, interpreted\n.help for commands · Ctrl+D to exit");
+        puts("  C, interpreted. Mistakes welcome.");
+        if (app->color) fputs("\033[90m", stdout);
+        puts("\n  .help  commands     .config  preferences\n  Tab    complete     Ctrl+D   exit\n");
+        if (app->color) fputs("\033[0m", stdout);
     }
     int result = 0;
     for (;;) {
         size_t previous_length = buffer.length;
         ReadStatus read_status;
         if (editing) {
+            terminal.color = app->color;
+            terminal.highlighting = app->config.values[CFG_HIGHLIGHTING];
+            terminal.suggestions = app->config.values[CFG_SUGGESTIONS];
+            app->pending_source = buffer.data;
+            terminal.context = buffer.data;
             char *line = terminal_read(&terminal, buffer.length ? "... " : app->prompt, &interrupted);
+            app->pending_source = NULL;
             if (interrupted) read_status = READ_INTERRUPTED;
             else if (!line) read_status = READ_EOF;
             else read_status = append_text(&buffer, line) && append(&buffer, '\n') ? READ_OK : READ_ERROR;
@@ -333,6 +502,8 @@ static void usage(FILE *stream) {
           "  --no-prompt       Read a quiet, line-oriented REPL\n"
           "  --prompt TEXT     Set the primary prompt\n"
           "  --color MODE      auto, always, or never\n"
+          "  --config FILE     Load/save CLI preferences at FILE\n"
+          "  --no-config       Skip loading saved CLI preferences\n"
           "  --history FILE    Choose a history file\n"
           "  --no-history      Disable persistent history\n"
           "  --max-steps N     Set the execution step limit\n"
@@ -357,24 +528,28 @@ static int positive(const char *text, size_t maximum, size_t *result) {
 
 int main(int argc, char **argv) {
     Application app = {.prompt = "c> ", .steps = 1000000, .depth = 2048, .nesting = 8};
-    const char *path = NULL, *source = NULL, *color_mode = "auto";
-    int quiet_repl = 0, path_index = 0, no_history = 0;
+    config_defaults(&app.config);
+    const char *path = NULL, *source = NULL, *color_mode = NULL;
+    int quiet_repl = 0, path_index = 0, no_history = 0, no_config = 0, explicit_config = 0;
     for (int i = 1; i < argc; ++i) {
         const char *argument = argv[i];
         if (!strcmp(argument, "--help") || !strcmp(argument, "-h")) { usage(stdout); return 0; }
         if (!strcmp(argument, "--version")) { puts("Cterpreter " CT_VERSION); return 0; }
         if (!strcmp(argument, "--no-prompt")) quiet_repl = 1;
+        else if (!strcmp(argument, "--no-config")) no_config = 1;
         else if (!strcmp(argument, "--no-history")) no_history = 1;
         else if (!strcmp(argument, "--verbose")) app.verbose = 1;
         else if (!strcmp(argument, "--strict")) app.strict = 1;
         else if ((!strcmp(argument, "-e") || !strcmp(argument, "--prompt") || !strcmp(argument, "--color") ||
                   !strcmp(argument, "--history") || !strcmp(argument, "--max-steps") ||
-                  !strcmp(argument, "--max-depth") || !strcmp(argument, "--max-nesting")) && i + 1 < argc) {
+                  !strcmp(argument, "--max-depth") || !strcmp(argument, "--max-nesting") ||
+                  !strcmp(argument, "--config")) && i + 1 < argc) {
             const char *value = argv[++i];
             if (!strcmp(argument, "-e")) { if (source) { usage(stderr); return 2; } source = value; }
             else if (!strcmp(argument, "--prompt")) app.prompt = value;
             else if (!strcmp(argument, "--color")) color_mode = value;
             else if (!strcmp(argument, "--history")) app.history_path = value;
+            else if (!strcmp(argument, "--config")) { app.config_path = value; explicit_config = 1; }
             else {
                 size_t limit;
                 size_t maximum = !strcmp(argument, "--max-depth") ? 8192 : !strcmp(argument, "--max-nesting") ? 64 : SIZE_MAX;
@@ -388,10 +563,16 @@ int main(int argc, char **argv) {
         else { usage(stderr); return 2; }
     }
     if ((quiet_repl && (path || source)) || (path && source)) { usage(stderr); return 2; }
-    if (strcmp(color_mode, "auto") && strcmp(color_mode, "always") && strcmp(color_mode, "never")) {
+    char default_config[4096];
+    if (!app.config_path && getenv("HOME")) {
+        int length = snprintf(default_config, sizeof default_config, "%s/.cterpreterrc", getenv("HOME"));
+        if (length > 0 && (size_t)length < sizeof default_config) app.config_path = default_config;
+    }
+    if (!no_config && app.config_path && !config_load(&app.config, app.config_path, 1) && explicit_config) return 2;
+    if (color_mode && !config_set(&app.config, "color", color_mode)) {
         fputs("error: --color expects auto, always, or never\n", stderr); return 2;
     }
-    app.color = !strcmp(color_mode, "always") || (!strcmp(color_mode, "auto") && isatty(STDOUT_FILENO) && !getenv("NO_COLOR"));
+    update_color(&app);
     char default_history[4096];
     if (!app.history_path && !no_history && getenv("HOME")) {
         int length = snprintf(default_history, sizeof default_history, "%s/.cterpreter_history", getenv("HOME"));

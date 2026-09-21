@@ -52,7 +52,8 @@ static const char *const fragments[] = {
     "{", "}", "(", ")", "[", "]", ";", ",", ".", "->", "*", "&", "+", "-", "/", "%", "=", "==",
     "<<=", "...", "?", ":", "!", "~", "^", "|", "&&", "||", "++", "--", "#define", "#if", "#endif",
     "#include", "\"text\"", "'c'", "0", "1", "42", "2147483648", "0x", "1e", "1.5", "\\", "@",
-    "\"unterminated", "/*", "*/", "//", "\n", " ", "__FILE__", "__VA_ARGS__", "##"
+    "\"unterminated", "/*", "*/", "//", "\n", " ", "__FILE__", "__VA_ARGS__", "##",
+    "__ct_va_start", "__ct_va_arg", "__ct_va_end", "__ct_va_copy", "va_list", "\"stdarg.h\""
 };
 
 static size_t build(char *buffer, size_t capacity) {

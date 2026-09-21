@@ -62,6 +62,7 @@ compare examples/types/typedefs_generics.c
 compare examples/types/aggregates.c
 compare examples/types/function_pointers.c
 compare examples/types/numeric_types.c
+compare examples/types/variadic.c
 compare examples/io/csv_report.c
 compare examples/io/calculator.c --stdin "$work/calculator.in"
 

@@ -499,7 +499,8 @@ static CtType expression_type(CtInterpreter *interpreter, Node *node, unsigned d
         case N_GENERIC: return expression_type(interpreter, generic_selection(interpreter, node, depth), depth + 1);
         case N_VALUE: return node->token.value.type;
         case N_STRING: return type_pointer(CT_CHAR);
-        case N_CAST: return node->type;
+        case N_CAST: case N_VA_ARG: return node->type;
+        case N_VA_START: case N_VA_END: case N_VA_COPY: return CT_VOID;
         case N_COMPOUND: return type_decay(node->type);
         case N_SIZEOF: case N_ALIGNOF: return CT_ULONG;
         case N_INDEX: case N_MEMBER: return type_decay(object_type(interpreter, node, depth));
@@ -787,16 +788,157 @@ static Lvalue lvalue(CtInterpreter *interpreter, Node *node) {
     }
 }
 
+/* A va_list is an array of one reserved struct, so function parameters share its
+ * cursor and pointers to va_list work through the ordinary array/pointer rules. */
+static uint64_t va_address(CtInterpreter *interpreter, Token token, CtValue list) {
+    const TypeInfo *state = type_info(type_target(list.type));
+    if (!type_is_pointer(list.type) || state->kind != TY_STRUCT || !state->tag ||
+        strcmp(state->tag, "__ct_va_state") || state->member_count != 2 ||
+        state->members[0].type != CT_ULLONG || state->members[1].type != CT_ULLONG ||
+        state->size != 2 * ct_type_size(CT_ULLONG)) {
+        (void)runtime_error(interpreter, token, "stdarg operation requires a va_list");
+        return 0;
+    }
+    return list.as.address;
+}
+
+static int va_write(CtInterpreter *interpreter, Token token, uint64_t address, uint64_t identity, uint64_t index) {
+    if (!memory_write(&interpreter->memory, address, (CtValue){.type = CT_ULLONG, .as.unsigned_integer = identity}) ||
+        !memory_write(&interpreter->memory, address + ct_type_size(CT_ULLONG),
+                      (CtValue){.type = CT_ULLONG, .as.unsigned_integer = index})) {
+        (void)memory_error(interpreter, token);
+        return 0;
+    }
+    return 1;
+}
+
+static VaFrame *va_read(CtInterpreter *interpreter, Token token, uint64_t address, uint64_t *index, int ending) {
+    CtValue identity = memory_read(&interpreter->memory, address, CT_ULLONG);
+    if (interpreter->memory.error) { (void)memory_error(interpreter, token); return NULL; }
+    CtValue cursor = memory_read(&interpreter->memory, address + ct_type_size(CT_ULLONG), CT_ULLONG);
+    if (interpreter->memory.error) { (void)memory_error(interpreter, token); return NULL; }
+    if (!identity.as.unsigned_integer) {
+        (void)runtime_error(interpreter, token, "va_list is not active (uninitialized or ended)");
+        return NULL;
+    }
+    VaFrame *frame = interpreter->va_frame;
+    while (frame && frame->identity != identity.as.unsigned_integer) frame = frame->parent;
+    if (!frame) { (void)runtime_error(interpreter, token, "va_list belongs to a returned function"); return NULL; }
+    *index = cursor.as.unsigned_integer;
+    if (*index > frame->count && !(ending && *index == UINT64_MAX)) {
+        (void)runtime_error(interpreter, token, "va_list cursor is invalid or consumed by formatted I/O");
+        return NULL;
+    }
+    return frame;
+}
+
+int runtime_va_values(CtInterpreter *interpreter, Token token, CtValue list, const CtValue **values, size_t *count) {
+    uint64_t address = va_address(interpreter, token, list), index = 0;
+    if (interpreter->failed) return 0;
+    VaFrame *frame = va_read(interpreter, token, address, &index, 0);
+    if (!frame) return 0;
+    *count = frame->count - (size_t)index;
+    *values = *count ? frame->values + index : NULL;
+    /* C leaves the list indeterminate after v* I/O; only va_end is valid. */
+    return va_write(interpreter, token, address, frame->identity, UINT64_MAX);
+}
+
+static int va_compatible(CtValue value, CtType requested) {
+    if (value.type == requested) return 1;
+    /* C17 7.16.1.1 permits corresponding signed/unsigned types only when the
+     * value fits both, and permits void pointers paired with character pointers. */
+    if (type_is_integer(value.type) && type_is_integer(requested) &&
+        type_is_signed(value.type) != type_is_signed(requested)) {
+        CtType signed_type = type_is_signed(value.type) ? value.type : requested;
+        CtType unsigned_type = type_is_signed(value.type) ? requested : value.type;
+        if (signed_type >= CT_SCHAR && unsigned_type == signed_type + 1)
+            return value.as.unsigned_integer <= (uint64_t)type_maximum(signed_type);
+    }
+    if (type_is_pointer(value.type) && type_is_pointer(requested)) {
+        CtType a = type_target(value.type), b = type_target(requested);
+        return (a == CT_VOID && b >= CT_CHAR && b <= CT_UCHAR) ||
+               (b == CT_VOID && a >= CT_CHAR && a <= CT_UCHAR);
+    }
+    return 0;
+}
+
+static CtValue va_operation(CtInterpreter *interpreter, Node *node) {
+    CtValue result = {.type = CT_VOID};
+    CtValue list = evaluate(interpreter, node->left);
+    if (interpreter->failed) return result;
+    uint64_t address = va_address(interpreter, node->token, list), index = 0;
+    if (interpreter->failed) return result;
+    VaFrame *frame = interpreter->va_frame;
+    if (node->kind == N_VA_START) {
+        if (!frame || !frame->function->variadic)
+            return runtime_error(interpreter, node->token, "va_start requires a variadic function");
+        Node *last = frame->function->left;
+        while (last && last->next) last = last->next;
+        if (!last || !node->right || node->right->kind != N_NAME ||
+            last->token.length != node->right->token.length ||
+            memcmp(last->token.start, node->right->token.start, last->token.length) ||
+            lookup(interpreter->scope, node->right->token, 0) != lookup(frame->scope, last->token, 1))
+            return runtime_error(interpreter, node->token, "va_start requires the last named parameter");
+        (void)va_write(interpreter, node->token, address, frame->identity, 0);
+        return result;
+    }
+    if (node->kind == N_VA_COPY) {
+        CtValue source = evaluate(interpreter, node->right);
+        if (interpreter->failed) return result;
+        uint64_t source_address = va_address(interpreter, node->token, source);
+        if (interpreter->failed) return result;
+        frame = va_read(interpreter, node->token, source_address, &index, 0);
+        if (frame) (void)va_write(interpreter, node->token, address, frame->identity, index);
+        return result;
+    }
+    frame = va_read(interpreter, node->token, address, &index, node->kind == N_VA_END);
+    if (!frame) return result;
+    if (node->kind == N_VA_END) {
+        (void)va_write(interpreter, node->token, address, 0, 0);
+        return result;
+    }
+    if (index == frame->count) return runtime_error(interpreter, node->token, "va_arg has no remaining argument");
+    result = frame->values[index];
+    if (!va_compatible(result, node->type))
+        return runtime_error(interpreter, node->token, "va_arg type does not match the promoted argument type");
+    result = runtime_convert(interpreter, node->token, result, node->type);
+    if (type_is_aggregate(result.type)) {
+        uint64_t copy = temporary_object(interpreter, interpreter->scope, node->token, ct_type_size(result.type));
+        if (copy && copy_object(interpreter, node->token, copy, result.as.address, result.type)) result.as.address = copy;
+    }
+    if (!interpreter->failed) (void)va_write(interpreter, node->token, address, frame->identity, index + 1);
+    return result;
+}
+
 /* Binds already-evaluated arguments to an interpreted function and runs its body. */
 static CtValue invoke(CtInterpreter *interpreter, Token name, Node *function, const CtValue *values, size_t count) {
     if (!function->right) return runtime_error(interpreter, name, "function is declared but not defined");
-    if (function->variadic) return runtime_error(interpreter, name, "variadic interpreted functions are unsupported");
     size_t parameters = 0;
     for (Node *p = function->left; p; p = p->next) ++parameters;
-    if (parameters != count) return runtime_error(interpreter, name, "incorrect number of arguments");
+    if (count < parameters || (!function->variadic && parameters != count))
+        return runtime_error(interpreter, name, "incorrect number of arguments");
     Scope *caller = interpreter->scope;
     Scope frame = {.parent = &interpreter->globals};
     interpreter->scope = &frame;
+    VaFrame arguments = {.function = function, .scope = &frame, .count = count - parameters,
+                         .parent = interpreter->va_frame};
+    interpreter->va_frame = &arguments;
+    if (function->variadic) {
+        arguments.identity = temporary_object(interpreter, &frame, name, 1);
+        arguments.values = arguments.count ? calloc(arguments.count, sizeof *arguments.values) : NULL;
+        if (arguments.count && !arguments.values) (void)runtime_error(interpreter, name, "out of memory");
+        for (size_t i = 0; i < arguments.count && !interpreter->failed; ++i) {
+            CtValue value = values[parameters + i];
+            if (type_is_aggregate(value.type)) {
+                uint64_t copy = temporary_object(interpreter, &frame, name, ct_type_size(value.type));
+                if (copy && copy_object(interpreter, name, copy, value.as.address, value.type)) value.as.address = copy;
+            } else if (value.type == CT_VOID) {
+                (void)runtime_error(interpreter, name, "void expression cannot be a variadic argument");
+            } else value = runtime_convert(interpreter, name, value,
+                                           value.type == CT_FLOAT ? CT_DOUBLE : type_promote(value.type));
+            arguments.values[i] = value;
+        }
+    }
     size_t index = 0;
     for (Node *p = function->left; p && !interpreter->failed; p = p->next) {
         Symbol *parameter = define(interpreter, p->token, p->type);
@@ -823,6 +965,8 @@ static CtValue invoke(CtInterpreter *interpreter, Token name, Node *function, co
     }
     scope_clear(interpreter, &frame);
     interpreter->scope = caller;
+    interpreter->va_frame = arguments.parent;
+    free(arguments.values);
     return result;
 }
 
@@ -877,6 +1021,8 @@ static CtValue call(CtInterpreter *interpreter, Node *node) {
 
 static CtValue evaluate_inner(CtInterpreter *interpreter, Node *node) {
     switch (node->kind) {
+        case N_VA_START: case N_VA_ARG: case N_VA_END: case N_VA_COPY:
+            return va_operation(interpreter, node);
         case N_VALUE: return node->token.value;
         case N_GENERIC: {
             Node *selected = generic_selection(interpreter, node, 0);
@@ -1023,7 +1169,6 @@ static void declare_function(CtInterpreter *interpreter, Node *node) {
             if (p->token.length && p->token.length == q->token.length && !memcmp(p->token.start, q->token.start, p->token.length))
                 (void)runtime_error(interpreter, q->token, "duplicate parameter name");
     }
-    if (node->right && node->variadic) (void)runtime_error(interpreter, node->token, "variadic interpreted functions are unsupported");
     if (interpreter->failed) return;
     Symbol *symbol = lookup(interpreter->scope, node->token, 1);
     if (symbol) {

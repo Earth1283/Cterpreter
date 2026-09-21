@@ -572,6 +572,25 @@ static CtType type_specifier(Parser *parser, int *is_static, int *is_const, Node
 
 static Node *primary(Parser *parser) {
     Token token = parser->token;
+    static const char *va_names[] = {"__ct_va_start", "__ct_va_arg", "__ct_va_end", "__ct_va_copy"};
+    for (size_t i = 0; token.kind == TK_NAME && i < sizeof va_names / sizeof va_names[0]; ++i) {
+        if (token.length != strlen(va_names[i]) || memcmp(token.start, va_names[i], token.length)) continue;
+        Node *result = node(parser, (NodeKind)(N_VA_START + i), token);
+        if (!result) return NULL;
+        next(parser);
+        expect(parser, '(', "expected '(' after stdarg intrinsic");
+        result->left = expression(parser, 1);
+        if (result->kind != N_VA_END) {
+            expect(parser, ',', "expected ',' in stdarg intrinsic");
+            if (result->kind == N_VA_ARG) {
+                result->type = type_name_of(parser);
+                if (!type_info(result->type)->complete || !ct_type_size(result->type) || type_is_array(result->type))
+                    fail(parser, "va_arg requires a complete non-array object type");
+            } else result->right = expression(parser, 1);
+        }
+        expect(parser, ')', "expected ')' after stdarg intrinsic");
+        return result;
+    }
     if (accept(parser, TK_GENERIC)) {
         Node *result = node(parser, N_GENERIC, token);
         if (!result) return NULL;
@@ -1075,13 +1094,14 @@ static void dump_node(FILE *output, const Node *node, unsigned depth) {
         "declaration", "expression", "block", "if", "while", "for", "return", "break",
         "continue", "function", "empty", "string", "index", "cast", "sizeof", "alignof",
         "declarations", "initializer", "do", "switch", "case", "goto", "label", "typedef",
-        "enumerator", "generic", "association", "member", "compound", "designated", "designator"
+        "enumerator", "generic", "association", "member", "compound", "designated", "designator",
+        "va_start", "va_arg", "va_end", "va_copy"
     };
     for (; node; node = node->next) {
         fprintf(output, "%*s%s", (int)(depth * 2), "", names[node->kind]);
         if (node->token.length) fprintf(output, " %.*s", (int)node->token.length, node->token.start);
         if (node->kind == N_DECLARATION || node->kind == N_FUNCTION || node->kind == N_TYPEDEF ||
-            node->kind == N_CAST || node->kind == N_COMPOUND) {
+            node->kind == N_CAST || node->kind == N_COMPOUND || node->kind == N_VA_ARG) {
             char name[128];
             ct_type_name(node->type, name, sizeof name);
             fprintf(output, " : %s", name);

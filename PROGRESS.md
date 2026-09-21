@@ -1,5 +1,38 @@
 # Misendeavor log
 
+## 2026-09-21 — CLI preferences and presentation
+
+The REPL now has a `.config` command with independent controls for plain-language syntax tips, automatic highlighting, suggestions/Tab completion, function signatures, live diagnostics, and the color mode. Changes apply immediately. `.config reset` restores defaults in memory; `.config save` writes `~/.cterpreterrc` through a temporary file and rename. Startup reads that file, `--config FILE` selects another path, `--no-config` skips loading, and `--color` overrides a saved color mode. Invalid files are rejected without partially applying their settings.
+
+The CLI has a cleaner banner and settings display, a consistent cyan prompt, and colors for types, keywords, function calls, numeric literals, strings, and comments. Highlighting follows multiline comment/string context and remains visible after submitting a line. Long input scrolls horizontally; hints and suggestions are clipped to the terminal width. Automatic colors respect `NO_COLOR` and `TERM=dumb`.
+
+The status line labels function signatures, syntax diagnostics, and readable tips. Tips include control-flow templates and explanations for common parser errors. Checks use pending multiline source, and signature lookup ignores parentheses inside strings and comments. `.config` names and values support Tab completion. These preferences survive `.clear` and source replay without affecting program execution or its resource limits.
+
+The new optional Python 3 CTest check exercises saved preferences, invalid configurations, command-line overrides, tips, and the actual terminal editor through a pseudo-terminal. It verifies live feature toggles, multiline comment highlighting, completion, signatures, `NO_COLOR`, and editing a 121-byte expression in a 32-column terminal. All **9 CTest checks pass** in the normal and AddressSanitizer/UndefinedBehaviorSanitizer builds; the final config-completion addition also passes the targeted CLI check in both builds.
+
+## 2026-09-21 — Work since 0.3.0: variadic functions
+
+Interpreted functions can now accept `...`, including calls through function pointers. `stdarg.h` supplies `va_list`, `va_start`, `va_arg`, `va_copy`, and `va_end`. Unnamed arguments receive the default integer and floating-point promotions; aggregate arguments are copied by value. Recursive calls have separate argument frames, and lists can be forwarded to helpers or copied for independent traversal.
+
+The seven formatted-I/O adapters `vprintf`, `vfprintf`, `vsprintf`, `vsnprintf`, `vscanf`, `vfscanf`, and `vsscanf` reuse the existing checked format engines with interpreted arguments. A list consumed by these adapters must be ended; a copy made beforehand supports a second pass. No host `va_list` or host address is exposed to the interpreted program.
+
+### Diagnostics and supporting fixes
+
+- `va_start` checks that it runs in a variadic function and names its actual last parameter, including shadowing checks.
+- `va_arg` diagnoses exhausted lists and mismatched promoted types, while accepting the standard's representable signed/unsigned and character-pointer/void-pointer exceptions.
+- Ended, uninitialized, expired, and formatted-I/O-consumed lists are diagnosed. Argument frames unwind on runtime errors and evaluation-limit failures, leaving the REPL usable.
+- Built-in headers now preserve ordinary declarations as well as macro definitions; previously the header path discarded declarations, including the new `va_list` typedef.
+- `sizeof`, `_Generic`, type inspection, and AST dumps recognize the stdarg intrinsics without consuming arguments during inspection.
+
+### Verification
+
+- All **8 CTest checks pass** in both the normal GCC build and the AddressSanitizer/UndefinedBehaviorSanitizer build.
+- The new varargs suite covers promotions, indirect and recursive calls, aggregate copies, helper forwarding, independent list cursors, single evaluation of list operands, diagnostics, error recovery, all seven formatted-I/O adapters, and clearing/reusing a session.
+- Parser tests cover malformed intrinsics and typed AST output; the fuzz corpus now includes stdarg intrinsics.
+- [examples/types/variadic.c](examples/types/variadic.c) matches the host compiler's output and exit status in the reference comparison. The example collection now contains **31 programs**.
+
+This closes the variadic-function and `va_list` gaps listed in the 0.3.0 checkpoint below. The other unfinished language features and self-interpretation remain open; this is not a new release or a claim of complete C17 conformance.
+
 ## 2026-09-21 — Current state: 0.3.0
 
 The interpreter gained a real type system. Types are now interned descriptions in a shared registry rather than an arithmetic encoding of a scalar kind, which made structures, unions, multidimensional arrays, function types, and complex declarators expressible for the first time. On top of that, the full C numeric tower and its conversion rules landed, and the REPL's ghost text, signature hints, and diagnostics now come from the live session instead of a fixed word list.

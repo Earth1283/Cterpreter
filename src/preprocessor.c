@@ -460,6 +460,12 @@ static char *header_definitions(const char *header) {
                     "#define SEEK_SET 0\n#define SEEK_CUR 1\n#define SEEK_END 2\n"},
         {"stdlib.h", PP_COMMON "#define EXIT_SUCCESS 0\n#define EXIT_FAILURE 1\n#define RAND_MAX 32767\n"},
         {"string.h", PP_COMMON},
+        {"stdarg.h", "#ifndef __CT_STDARG_H\n#define __CT_STDARG_H\n"
+                     "typedef struct __ct_va_state { unsigned long long frame, index; } va_list[1];\n"
+                     "#define va_start(ap, last) __ct_va_start((ap), last)\n"
+                     "#define va_arg(ap, type) __ct_va_arg((ap), type)\n"
+                     "#define va_end(ap) __ct_va_end((ap))\n"
+                     "#define va_copy(dest, src) __ct_va_copy((dest), (src))\n#endif\n"},
         {"math.h", PP_COMMON},
         {"ctype.h", ""},
         {"stdbool.h", "#define bool _Bool\n#define true 1\n#define false 0\n"
@@ -542,6 +548,10 @@ static void include(Expansion *expansion, const char *source, Text *output, unsi
         size_t line = expansion->line;
         Text declarations = {0};
         (void)process(expansion, definitions, &declarations, depth + 1);
+        /* Most built-in headers contain only macros. Preserve real declarations
+         * too (stdarg.h supplies va_list), without adding macro-only blank lines. */
+        if (declarations.data && strspn(declarations.data, " \t\r\n") < declarations.length)
+            emit(expansion, output, declarations.data, declarations.length);
         free(declarations.data);
         free(definitions);
         expansion->line = line;

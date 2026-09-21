@@ -45,11 +45,14 @@ An expression without a final semicolon prints its value. A semicolon suppresses
 
 Incomplete syntax continues at `...`. Ctrl+C cancels input or execution, and Ctrl+D exits. Syntax errors leave the existing session intact. Runtime errors preserve effects that already completed.
 
-The terminal supports arrows, Home/End, insertion, deletion, Ctrl+A/E, Ctrl+K/U/W, history recall, and Ctrl+R to search earlier history for the current text. Tab accepts an inline suggestion drawn from the session's own globals, macros, and library names. The line under the prompt shows the signature of the call the cursor sits inside, or the first diagnostic in what you have typed so far; it is produced by parsing the input without executing it. History defaults to `~/.cterpreter_history`. Editing assumes single-column characters and works best with lines narrower than the terminal.
+The terminal supports arrows, Home/End, insertion, deletion, Ctrl+A/E, Ctrl+K/U/W, history recall, and Ctrl+R to search earlier history for the current text. Tab accepts an inline suggestion drawn from the session's own globals, macros, and library names. Syntax highlighting distinguishes types, keywords, calls, numbers, strings, and comments, including comments continued across input lines. Long lines scroll horizontally; suggestions and the status line fit the terminal width. Editing still assumes single-column characters. History defaults to `~/.cterpreter_history`.
+
+The line under the prompt shows a function signature, a live syntax diagnostic, or a plain-language tip. Diagnostics check input containing a semicolon or closing brace, including pending multiline source, without executing it. Signature hints ignore parentheses inside strings and comments. Each feature can be toggled independently with `.config`.
 
 | Command | Effect |
 | --- | --- |
 | `.help`, `.version`, `.quit` | Help, version, exit |
+| `.config` | List CLI preferences and usage |
 | `.clear` | Reset variables, functions, types, macros, and allocations |
 | `.vars` or `.dump` | Inspect globals, functions, memory, and limits |
 | `.depth` | Show how many `interpret()` calls deep this instance is |
@@ -61,6 +64,23 @@ The terminal supports arrows, Home/End, insertion, deletion, Ctrl+A/E, Ctrl+K/U/
 | `.restore FILE` | Replay source into a fresh session |
 
 Save/restore is source replay, not a memory snapshot. Replay repeats I/O and other side effects, and input-dependent programs can produce different state. A failed restore retains the previous interpreter. Saved submissions receive statement separators so bare REPL expressions can be replayed.
+
+## CLI preferences
+
+```text
+c> .config
+c> .config tips off
+c> .config highlighting on
+c> .config suggestions toggle
+c> .config color auto
+c> .config save
+```
+
+`tips`, `highlighting`, `suggestions`, `signatures`, and `diagnostics` accept `on`, `off`, or `toggle`; all default to on. Turning suggestions off disables both ghost text and Tab completion. `color` accepts `auto`, `always`, or `never` and defaults to auto. Highlighting needs color enabled; auto respects `NO_COLOR`, redirected output, and `TERM=dumb`. Tab completion and text hints still work without color. Parser errors after submission are always shown; `diagnostics` controls only the live status line.
+
+Changes take effect immediately and survive `.clear` and source replay. `.config NAME` shows one setting. `.config reset` restores defaults for this session. `.config save` explicitly writes preferences to `~/.cterpreterrc`, which is read on startup; quitting does not save changes automatically.
+
+Use `--config FILE` to select another preferences file, or `--no-config` to skip loading saved preferences. A missing file starts with defaults. `--color` overrides the loaded color setting. Files contain `name=value` lines and optional `#` comments; invalid files are rejected as a whole. An invalid default file emits a diagnostic and uses defaults; an invalid explicit `--config` file exits with status 2. CLI preferences do not change the interpreted language or execution limits.
 
 ## Files and command-line options
 
@@ -100,18 +120,20 @@ This is nesting, not self-interpretation: Cterpreter cannot yet run its own sour
 - Arithmetic, comparison, logical, bitwise, shift, assignment, increment/decrement, and conditional operators.
 - Lexical scopes, globals, static locals, `const` objects, and multiple declarators per declaration.
 - Function definitions, prototypes, recursion, and void functions.
+- Variadic interpreted functions with default argument promotions, `stdarg.h`, `va_start`, `va_arg`, `va_copy`, and `va_end`. Lists can be passed to helpers or copied for independent traversal; invalid types, exhausted lists, and use after the owning call returns are diagnosed.
 - `if`/`else`, `while`, `do-while`, `for`, `switch` with direct case labels, `break`, `continue`, `return`, and jumps to labels in the same or an enclosing block.
 - Address-of, dereferencing, subscripting, pointer arithmetic, and a managed address space with object lifetimes.
 - `malloc`, `calloc`, `realloc`, `free`, and diagnostics for null pointers, bounds violations, uninitialized reads, invalid frees, expired objects, and writes to string literals.
 - `#include`, `#define`, `#undef`, conditional directives, function-like/variadic macros, stringification, token concatenation, `#pragma once`, `#line`, and `#error`.
 - The predefined macros `__FILE__`, `__LINE__`, `__DATE__`, `__TIME__`, `__COUNTER__`, `__STDC__`, `__STDC_VERSION__`, `__STDC_HOSTED__`, the `__STDC_NO_*` feature macros, `__CTERPRETER__`, and `__CTERPRETER_VERSION__`.
 
-Quoted headers resolve relative to the source file. Supported standard includes are `stdio.h`, `stdlib.h`, `string.h`, `math.h`, `ctype.h`, `stddef.h`, `stdint.h`, `stdbool.h`, `limits.h`, `float.h`, `time.h`, `errno.h`, `assert.h`, and `iso646.h`; they expose the implemented runtime subset with the host's real limits, not the host system headers. Include guards and `#pragma once` both work. Macro expansion remains a subset of the C17 preprocessing rules.
+Quoted headers resolve relative to the source file. Supported standard includes are `stdio.h`, `stdlib.h`, `string.h`, `stdarg.h`, `math.h`, `ctype.h`, `stddef.h`, `stdint.h`, `stdbool.h`, `limits.h`, `float.h`, `time.h`, `errno.h`, `assert.h`, and `iso646.h`; they expose the implemented runtime subset with the host's real limits, not the host system headers. Include guards and `#pragma once` both work. Macro expansion remains a subset of the C17 preprocessing rules.
 
 The runtime includes:
 
 - `printf`, `fprintf`, `puts`, `putchar`, `getchar`, `sprintf`, and `snprintf`.
 - `scanf`, `fscanf`, and `sscanf` with `h`, `hh`, `l`, `ll`, and `z` destinations, and destination bounds checks.
+- `vprintf`, `vfprintf`, `vsprintf`, `vsnprintf`, `vscanf`, `vfscanf`, and `vsscanf`, forwarding an interpreted `va_list` through the same checked format engines. Call `va_end` after using a list this way; use `va_copy` beforehand if you need another pass. See [the variadic example](examples/types/variadic.c).
 - File opening/closing, line and block I/O, seeking, flushing, EOF/error queries, `ungetc`, `remove`, and `rename`. Open files are closed when the interpreter is cleared or destroyed.
 - `stdin`, `stdout`, `stderr`, an assignable `errno`, `perror`, `strerror`, and `getenv`. Standard streams remain owned by the interpreter.
 - `strlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`, `strcat`, `strncat`, `strchr`, `strrchr`, `strstr`, `strspn`, `strcspn`, `strpbrk`, `strtok`, `memcpy`, `memmove`, `memset`, `memcmp`, and `memchr`.
@@ -124,7 +146,7 @@ The runtime includes:
 
 ## Current limits
 
-This is not a conforming C17 implementation. Remaining work includes bit-fields, `long double`, complex numbers, atomics, variable-length arrays, variadic interpreted functions, `va_list`, arbitrary jumps into nested blocks, and self-interpretation. `volatile` and `restrict` are accepted and ignored; `extern` declares rather than references. Array bounds must be integer constant expressions the parser can fold. Pointer values use a virtual 64-bit address representation, not host addresses, so casting a pointer to an integer yields that virtual address.
+This is not a conforming C17 implementation. Remaining work includes bit-fields, `long double`, complex numbers, atomics, variable-length arrays, arbitrary jumps into nested blocks, and self-interpretation. `volatile` and `restrict` are accepted and ignored; `extern` declares rather than references. Array bounds must be integer constant expressions the parser can fold. Pointer values use a virtual 64-bit address representation, not host addresses, so casting a pointer to an integer yields that virtual address.
 
 Semantic checking largely happens during execution. Operand/argument evaluation proceeds left to right, and unsequenced side effects are not diagnosed. Some invalid constructs in unexecuted branches can therefore escape checking. Switch labels belong directly to the switch block. Diagnostics after expanded includes can refer to the expanded source line rather than the original header line.
 
@@ -138,7 +160,7 @@ Defaults are 1 MiB of source per submission, 64 MiB of live managed object data,
 
 Objects live in a table kept sorted by address, so a memory access is a binary search rather than a walk of every allocation ever made. Freed objects stay in that table, which is what lets an access report that a lifetime ended rather than that a pointer was never valid; only the most recent few thousand deaths are kept, so a long-running loop cannot grow the table without bound.
 
-Strict Clang/GCC warnings are enabled. The test suite covers the lexer and parser directly, pins integer boundaries and conversions, fuzzes malformed input, and compares every example against the host compiler's own output. CI is configured for GCC and Clang on Linux and Apple Clang on macOS; these hosted runs have not been executed in this workspace.
+Strict Clang/GCC warnings are enabled. The test suite covers the lexer and parser directly, pins integer boundaries and conversions, fuzzes malformed input, and compares every example against the host compiler's own output. When Python 3 is available, CTest also tests preference persistence and the real terminal editor through a pseudo-terminal, including live toggles and narrow windows. CI is configured for GCC and Clang on Linux and Apple Clang on macOS; these hosted runs have not been executed in this workspace.
 
 ```sh
 ctest --test-dir build --output-on-failure

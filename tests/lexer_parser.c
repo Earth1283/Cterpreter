@@ -182,6 +182,15 @@ int main(void) {
 
     expect_parse("int x = 1;", CT_OK);
     expect_parse("int f(int a, int b) { return a + b; }", CT_OK);
+    expect_parse("int f(int n, ...) { return n; }", CT_OK);
+    expect_parse("int f(...) { return 0; }", CT_ERROR);
+    expect_parse("__ct_va_arg(ap, int[2]);", CT_ERROR);
+    expect_parse("__ct_va_arg(ap, void);", CT_ERROR);
+    expect_parse("__ct_va_arg(ap,", CT_INCOMPLETE);
+    expect_parse("__ct_va_start(ap);", CT_ERROR);
+    expect_parse("__ct_va_copy(ap,);", CT_ERROR);
+    expect_parse("__ct_va_end(ap, ap);", CT_ERROR);
+    expect_tree("__ct_va_arg(ap, unsigned long);", "va_arg __ct_va_arg : unsigned long");
     expect_parse("struct Point { int x, y; }; struct Point p = { .y = 2 };", CT_OK);
     expect_parse("int (*table[4])(int, char **);", CT_OK);
     expect_parse("typedef int (*Handler)(void); Handler h;", CT_OK);

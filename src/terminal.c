@@ -2,6 +2,7 @@
 
 #include "terminal.h"
 #include "cterpreter.h"
+#include "lexer.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -9,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/select.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -34,7 +36,7 @@ static void history_add(Terminal *terminal, const char *text) {
 }
 
 void terminal_init(Terminal *terminal, const char *history_path, int color) {
-    *terminal = (Terminal){.history_path = history_path, .color = color};
+    *terminal = (Terminal){.history_path = history_path, .color = color, .highlighting = 1, .suggestions = 1};
     if (!history_path) return;
     FILE *file = fopen(history_path, "r");
     if (!file) return;
@@ -51,12 +53,13 @@ void terminal_init(Terminal *terminal, const char *history_path, int color) {
 }
 
 static const char *completion(Terminal *terminal, const char *line, size_t length) {
+    if (!terminal->suggestions) return NULL;
     if (terminal->complete) {
         const char *suffix = terminal->complete(terminal->session, line, length);
         if (suffix) return suffix;
     }
     static const char *words[] = {
-        ".help", ".quit", ".clear", ".version", ".type", ".source", ".vars", ".ast", ".load", ".save", ".restore", ".depth",
+        ".help", ".config", ".quit", ".clear", ".version", ".type", ".source", ".vars", ".ast", ".load", ".save", ".restore", ".depth",
         "printf", "puts", "putchar", "getchar", "malloc", "calloc", "realloc", "free", "sizeof", "strlen", "strcmp",
         "strcpy", "memcpy", "memset", "snprintf", "return", "continue", "break", "double", "static", "const", "switch"
     };
@@ -69,38 +72,115 @@ static const char *completion(Terminal *terminal, const char *line, size_t lengt
     return NULL;
 }
 
-static void render(Terminal *terminal, const char *prompt, const char *line, size_t length, size_t cursor, int status) {
-    fputs("\r\033[2K", stdout);
-    if (terminal->color) fputs("\033[36m", stdout);
-    fputs(prompt, stdout);
-    if (terminal->color) fputs("\033[0m", stdout);
-    int quoted = 0;
-    for (size_t i = 0; i < length; ++i) {
-        unsigned char c = (unsigned char)line[i];
-        if (terminal->color && c == '"' && (!i || line[i - 1] != '\\')) {
-            quoted = !quoted;
-            fputs(quoted ? "\033[32m" : "\033[0m", stdout);
+typedef struct { int comment, quote; } SyntaxState;
+
+/* Tolerant tokenization: unfinished strings/comments still get useful colors. */
+static size_t syntax_span(const char *text, size_t start, SyntaxState *state, const char **style) {
+    size_t end = start;
+    *style = "\033[0m";
+    if (state->comment || (text[start] == '/' && text[start + 1] == '*')) {
+        if (!state->comment) end += 2;
+        state->comment = 1;
+        while (text[end] && !(text[end] == '*' && text[end + 1] == '/')) ++end;
+        if (text[end]) { end += 2; state->comment = 0; }
+        *style = "\033[90m";
+    } else if (text[start] == '/' && text[start + 1] == '/') {
+        while (text[end] && text[end] != '\n') ++end;
+        *style = "\033[90m";
+    } else if (state->quote || text[start] == '"' || text[start] == '\'') {
+        if (!state->quote) state->quote = text[end++];
+        while (text[end]) {
+            if (text[end] == '\\' && text[end + 1]) end += 2;
+            else if (text[end++] == state->quote) { state->quote = 0; break; }
         }
-        if (terminal->color && !quoted && isdigit(c)) fputs("\033[33m", stdout);
-        if (c >= 32 && c != 127) fputc(c, stdout);
-        else fputc('?', stdout);
-        if (terminal->color && !quoted) fputs("\033[0m", stdout);
+        *style = "\033[32m";
+    } else if (isalpha((unsigned char)text[start]) || text[start] == '_') {
+        Lexer lexer;
+        lexer_init(&lexer, text + start);
+        Token token = lexer_next(&lexer);
+        end += token.length;
+        if (token.kind != TK_NAME) *style = "\033[1;35m";
+        switch (token.kind) {
+            case TK_INT: case TK_DOUBLE: case TK_VOID: case TK_CHAR: case TK_SIGNED:
+            case TK_UNSIGNED: case TK_SHORT: case TK_LONG: case TK_FLOAT: case TK_BOOL:
+            case TK_STRUCT: case TK_UNION: case TK_ENUM: case TK_TYPEDEF:
+                *style = "\033[36m"; break;
+            default: break;
+        }
+        size_t following = end;
+        while (isspace((unsigned char)text[following])) ++following;
+        if (token.kind == TK_NAME && text[following] == '(') *style = "\033[34m";
+    } else if (isdigit((unsigned char)text[start]) || (text[start] == '.' && isdigit((unsigned char)text[start + 1]))) {
+        ++end;
+        while (isalnum((unsigned char)text[end]) || text[end] == '.' ||
+               ((text[end] == '+' || text[end] == '-') && strchr("eEpP", text[end - 1]))) ++end;
+        *style = "\033[33m";
+    } else if (text[start] == '#' || (text[start] == '.' && !start)) {
+        ++end;
+        while (isalpha((unsigned char)text[end]) || text[end] == '_') ++end;
+        *style = "\033[1;36m";
+    } else ++end;
+    return end;
+}
+
+static void plain_span(const char *text, size_t start, size_t end) {
+    for (size_t i = start; i < end; ++i) {
+        unsigned char c = (unsigned char)text[i];
+        fputc(c >= 32 && c != 127 ? c : '?', stdout);
     }
+}
+
+static void highlight(Terminal *terminal, const char *line, size_t length, size_t start, size_t end) {
+    if (!terminal->color || !terminal->highlighting) { plain_span(line, start, end); return; }
+    SyntaxState state = {0};
+    const char *style;
+    if (terminal->context)
+        for (size_t i = 0; terminal->context[i];) i = syntax_span(terminal->context, i, &state, &style);
+    for (size_t i = 0; i < length;) {
+        size_t next = syntax_span(line, i, &state, &style);
+        if (next > start && i < end) {
+            fputs(style, stdout);
+            plain_span(line, i < start ? start : i, next < end ? next : end);
+        }
+        i = next;
+        if (i >= end) break;
+    }
+    fputs("\033[0m", stdout);
+}
+
+static size_t render(Terminal *terminal, const char *prompt, const char *line, size_t length, size_t cursor, int status) {
+    struct winsize window = {0};
+    size_t columns = ioctl(STDOUT_FILENO, TIOCGWINSZ, &window) == 0 && window.ws_col >= 8 ? window.ws_col : 80;
+    size_t prompt_length = strlen(prompt);
+    if (prompt_length > columns / 2) prompt_length = columns / 2;
+    size_t width = columns - prompt_length - 1;
+    size_t start = cursor >= width ? cursor - width + 1 : 0;
+    size_t end = length < start + width ? length : start + width;
+    fputs("\r\033[2K", stdout);
+    if (terminal->color) fputs("\033[1;36m", stdout);
+    plain_span(prompt, 0, prompt_length);
     if (terminal->color) fputs("\033[0m", stdout);
-    const char *suggestion = cursor == length ? completion(terminal, line, length) : NULL;
-    if (suggestion && terminal->color) fprintf(stdout, "\033[90m%s\033[0m", suggestion);
+    highlight(terminal, line, length, start, end);
+    const char *suggestion = status && cursor == length ? completion(terminal, line, length) : NULL;
+    if (suggestion && terminal->color) {
+        size_t size = strlen(suggestion), available = width - (end - start);
+        fputs("\033[90m", stdout);
+        plain_span(suggestion, 0, size < available ? size : available);
+        fputs("\033[0m", stdout);
+    }
     const char *note = status && terminal->hint ? terminal->hint(terminal->session, line, cursor) : NULL;
     fputs("\n\033[2K", stdout);
     if (note) {
         if (terminal->color) fputs("\033[90m", stdout);
-        for (const char *cursor_note = note; *cursor_note && cursor_note - note < 200; ++cursor_note)
-            fputc(*cursor_note >= 32 && *cursor_note != 127 ? *cursor_note : ' ', stdout);
+        size_t note_length = strlen(note);
+        plain_span(note, 0, note_length < columns - 1 ? note_length : columns - 1);
         if (terminal->color) fputs("\033[0m", stdout);
     }
     fputs("\033[A\r", stdout);
-    size_t column = strlen(prompt) + cursor;
+    size_t column = prompt_length + cursor - start;
     if (column) fprintf(stdout, "\033[%zuC", column);
     fflush(stdout);
+    return column;
 }
 
 static int read_byte(const volatile sig_atomic_t *interrupted) {
@@ -213,12 +293,9 @@ char *terminal_read(Terminal *terminal, const char *prompt, const volatile sig_a
     }
     (void)tcsetattr(STDIN_FILENO, TCSANOW, &saved);
     if (line) {
-        int color = terminal->color;
-        terminal->color = 0;
-        render(terminal, prompt, line, length, length, 0);
+        size_t column = render(terminal, prompt, line, length, length, 0);
         fputs("\r\033[B\033[2K\033[A\r", stdout);
-        if (strlen(prompt) + length) fprintf(stdout, "\033[%zuC", strlen(prompt) + length);
-        terminal->color = color;
+        if (column) fprintf(stdout, "\033[%zuC", column);
     }
     fputc('\n', stdout);
     free(draft);

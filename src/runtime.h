@@ -38,6 +38,17 @@ struct FunctionRef {
     FunctionRef *next;
 };
 
+/* These frames live on the host stack; va_list stores only a managed identity. */
+typedef struct VaFrame VaFrame;
+struct VaFrame {
+    uint64_t identity;
+    Node *function;
+    Scope *scope;
+    CtValue *values;
+    size_t count;
+    VaFrame *parent;
+};
+
 struct CtInterpreter {
     Scope globals;
     Scope *scope;
@@ -55,11 +66,14 @@ struct CtInterpreter {
     unsigned random_state;
     HostFile *files;
     FunctionRef *functions;
+    VaFrame *va_frame;
 };
 
 CtValue runtime_error(CtInterpreter *interpreter, Token token, const char *message);
 CtValue runtime_convert(CtInterpreter *interpreter, Token token, CtValue value, CtType type);
 CtValue runtime_invoke(CtInterpreter *interpreter, Token name, CtValue pointer, const CtValue *values, size_t count);
+/* Borrow the remaining promoted arguments, consuming the list for v* I/O. */
+int runtime_va_values(CtInterpreter *interpreter, Token name, CtValue list, const CtValue **values, size_t *count);
 int builtin_type(Token name, CtType *type);
 size_t builtin_count(void);
 const char *builtin_name(size_t index);
