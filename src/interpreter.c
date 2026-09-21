@@ -72,19 +72,62 @@ static void scope_clear(CtInterpreter *interpreter, Scope *scope) {
         Symbol *next = symbol->next;
         if (symbol->address && !symbol->is_static && !symbol->function)
             (void)memory_release(&interpreter->memory, symbol->address, 0);
-        free(symbol->name);
-        free(symbol);
+        symbol->next = interpreter->symbol_pool;
+        interpreter->symbol_pool = symbol;
         symbol = next;
     }
     scope->symbols = NULL;
+    free(scope->buckets);
+    scope->buckets = NULL;
+    scope->bucket_count = scope->symbol_count = 0;
     Temporary *temporary = scope->temporaries;
     while (temporary) {
         Temporary *next = temporary->next;
         (void)memory_release(&interpreter->memory, temporary->address, 0);
-        free(temporary);
+        temporary->next = interpreter->temporary_pool;
+        interpreter->temporary_pool = temporary;
         temporary = next;
     }
     scope->temporaries = NULL;
+}
+
+static uint64_t token_hash(Token token) {
+    uint64_t hash = 1469598103934665603ULL;
+    for (size_t i = 0; i < token.length; ++i) {
+        hash ^= (unsigned char)token.start[i];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static void scope_rehash(Scope *scope, size_t bucket_count) {
+    Symbol **buckets = calloc(bucket_count, sizeof *buckets);
+    if (!buckets) return;
+    for (Symbol *symbol = scope->symbols; symbol; symbol = symbol->next) {
+        size_t slot = symbol->hash & (bucket_count - 1);
+        symbol->bucket_next = buckets[slot];
+        buckets[slot] = symbol;
+    }
+    free(scope->buckets);
+    scope->buckets = buckets;
+    scope->bucket_count = bucket_count;
+}
+
+#define SCOPE_HASH_THRESHOLD 8
+
+static void scope_index(Scope *scope, Symbol *symbol) {
+    ++scope->symbol_count;
+    if (!scope->bucket_count) {
+        if (scope->symbol_count > SCOPE_HASH_THRESHOLD) scope_rehash(scope, 16);
+        return;
+    }
+    if (scope->symbol_count * 4 > scope->bucket_count * 3) {
+        scope_rehash(scope, scope->bucket_count * 2);
+        return;
+    }
+    size_t slot = symbol->hash & (scope->bucket_count - 1);
+    symbol->bucket_next = scope->buckets[slot];
+    scope->buckets[slot] = symbol;
 }
 
 CtInterpreter *ct_create(void) {
@@ -118,6 +161,17 @@ void ct_clear(CtInterpreter *interpreter) {
     }
     memory_destroy(&interpreter->memory);
     preprocessor_destroy(&interpreter->preprocessor);
+    while (interpreter->symbol_pool) {
+        Symbol *next = interpreter->symbol_pool->next;
+        free(interpreter->symbol_pool->name);
+        free(interpreter->symbol_pool);
+        interpreter->symbol_pool = next;
+    }
+    while (interpreter->temporary_pool) {
+        Temporary *next = interpreter->temporary_pool->next;
+        free(interpreter->temporary_pool);
+        interpreter->temporary_pool = next;
+    }
     interpreter->scope = &interpreter->globals;
     interpreter->error_number = 0;
     interpreter->token_state = 0;
@@ -170,10 +224,20 @@ static int tick(CtInterpreter *interpreter, Node *node) {
 }
 
 static Symbol *lookup(Scope *scope, Token token, int local_only) {
-    for (; scope; scope = local_only ? NULL : scope->parent)
-        for (Symbol *symbol = scope->symbols; symbol; symbol = symbol->next)
-            if (symbol->length == token.length && !memcmp(symbol->name, token.start, token.length))
-                return symbol;
+    uint64_t hash = token_hash(token);
+    for (; scope; scope = local_only ? NULL : scope->parent) {
+        if (scope->buckets) {
+            size_t slot = hash & (scope->bucket_count - 1);
+            for (Symbol *symbol = scope->buckets[slot]; symbol; symbol = symbol->bucket_next)
+                if (symbol->hash == hash && symbol->length == token.length &&
+                    !memcmp(symbol->name, token.start, token.length))
+                    return symbol;
+        } else {
+            for (Symbol *symbol = scope->symbols; symbol; symbol = symbol->next)
+                if (symbol->length == token.length && !memcmp(symbol->name, token.start, token.length))
+                    return symbol;
+        }
+    }
     return NULL;
 }
 
@@ -182,28 +246,45 @@ static Symbol *define(CtInterpreter *interpreter, Token token, CtType type) {
         (void)runtime_error(interpreter, token, "name already declared in this scope");
         return NULL;
     }
-    Symbol *symbol = calloc(1, sizeof *symbol);
-    if (symbol) symbol->name = malloc(token.length + 1);
-    if (!symbol || !symbol->name) {
-        free(symbol);
-        (void)runtime_error(interpreter, token, "out of memory");
-        return NULL;
+    Symbol *symbol = interpreter->symbol_pool;
+    if (symbol) interpreter->symbol_pool = symbol->next;
+    else symbol = calloc(1, sizeof *symbol);
+    if (!symbol) { (void)runtime_error(interpreter, token, "out of memory"); return NULL; }
+    if (symbol->name_capacity < token.length + 1) {
+        char *name = realloc(symbol->name, token.length + 1);
+        if (!name) {
+            symbol->next = interpreter->symbol_pool;
+            interpreter->symbol_pool = symbol;
+            (void)runtime_error(interpreter, token, "out of memory");
+            return NULL;
+        }
+        symbol->name = name;
+        symbol->name_capacity = token.length + 1;
     }
     memcpy(symbol->name, token.start, token.length);
     symbol->name[token.length] = '\0';
     symbol->length = token.length;
-    symbol->value.type = type;
+    symbol->hash = token_hash(token);
+    symbol->value = (CtValue){.type = type};
+    symbol->address = 0;
+    symbol->is_static = symbol->is_const = symbol->enum_constant = 0;
+    symbol->function = NULL;
+    symbol->bucket_next = NULL;
     symbol->next = interpreter->scope->symbols;
     interpreter->scope->symbols = symbol;
+    scope_index(interpreter->scope, symbol);
     return symbol;
 }
 
 static uint64_t temporary_object(CtInterpreter *interpreter, Scope *scope, Token token, size_t size) {
-    Temporary *temporary = calloc(1, sizeof *temporary);
+    Temporary *temporary = interpreter->temporary_pool;
+    if (temporary) interpreter->temporary_pool = temporary->next;
+    else temporary = malloc(sizeof *temporary);
     if (!temporary) { (void)runtime_error(interpreter, token, "out of memory"); return 0; }
     temporary->address = memory_allocate(&interpreter->memory, size, 1, 0);
     if (!temporary->address) {
-        free(temporary);
+        temporary->next = interpreter->temporary_pool;
+        interpreter->temporary_pool = temporary;
         (void)memory_error(interpreter, token);
         return 0;
     }

@@ -8,19 +8,27 @@
 typedef struct Symbol Symbol;
 struct Symbol {
     char *name;
-    size_t length;
+    size_t length, name_capacity;
+    uint64_t hash;
     CtValue value;
     uint64_t address;
     int is_static, is_const, enum_constant;
     Node *function;
-    Symbol *next;
+    Symbol *next;        /* declaration-order chain: full-scope iteration and teardown */
+    Symbol *bucket_next; /* hash-bucket chain within the owning scope's index, see lookup() */
 };
 
 typedef struct Temporary Temporary;
 struct Temporary { uint64_t address; Temporary *next; };
 
 typedef struct Scope Scope;
-struct Scope { Symbol *symbols; Temporary *temporaries; Scope *parent; };
+struct Scope {
+    Symbol *symbols;
+    Symbol **buckets;
+    size_t bucket_count, symbol_count;
+    Temporary *temporaries;
+    Scope *parent;
+};
 
 typedef struct HostFile HostFile;
 struct HostFile {
@@ -67,6 +75,8 @@ struct CtInterpreter {
     HostFile *files;
     FunctionRef *functions;
     VaFrame *va_frame;
+    Symbol *symbol_pool;       /* recycled Symbol nodes, avoids malloc/free per scope entry */
+    Temporary *temporary_pool; /* recycled Temporary nodes, same reason */
 };
 
 CtValue runtime_error(CtInterpreter *interpreter, Token token, const char *message);

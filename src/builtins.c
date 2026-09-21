@@ -32,7 +32,9 @@ static CtType return_type(ReturnKind kind) {
 
 #define VARIADIC 255
 
-static const struct { const char *name; ReturnKind type; unsigned char arity; const char *parameters; } signatures[] = {
+typedef struct { const char *name; ReturnKind type; unsigned char arity; const char *parameters; } Signature;
+
+static const Signature signatures[] = {
     {"printf", RT_INT, VARIADIC, "const char *format, ..."},
     {"sprintf", RT_INT, VARIADIC, "char *buffer, const char *format, ..."},
     {"snprintf", RT_INT, VARIADIC, "char *buffer, size_t size, const char *format, ..."},
@@ -170,29 +172,62 @@ const char *builtin_name(size_t index) {
     return index < builtin_count() ? signatures[index].name : NULL;
 }
 
-int builtin_prototype(Token name, char *buffer, size_t capacity) {
-    for (size_t i = 0; i < builtin_count(); ++i) {
-        if (!named(name, signatures[i].name)) continue;
-        char returns[64];
-        ct_type_name(return_type(signatures[i].type), returns, sizeof returns);
-        (void)snprintf(buffer, capacity, "%s %s(%s)", returns, signatures[i].name, signatures[i].parameters);
-        return 1;
+static int signature_compare(const char *name, Token token) {
+    size_t i = 0;
+    for (; i < token.length; ++i) {
+        unsigned char a = (unsigned char)name[i], b = (unsigned char)token.start[i];
+        if (a != b) return a < b ? -1 : 1;
     }
-    return 0;
+    return name[i] == '\0' ? 0 : 1;
+}
+
+static int signature_order_compare(const void *a, const void *b) {
+    return strcmp(signatures[*(const int *)a].name, signatures[*(const int *)b].name);
+}
+
+static const int *signature_order(void) {
+    static int order[sizeof signatures / sizeof signatures[0]];
+    static int ready;
+    if (!ready) {
+        for (size_t i = 0; i < builtin_count(); ++i) order[i] = (int)i;
+        qsort(order, builtin_count(), sizeof *order, signature_order_compare);
+        ready = 1;
+    }
+    return order;
+}
+
+static const Signature *find_signature(Token name) {
+    const int *order = signature_order();
+    size_t lo = 0, hi = builtin_count();
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        const Signature *row = &signatures[order[mid]];
+        int cmp = signature_compare(row->name, name);
+        if (cmp == 0) return row;
+        if (cmp < 0) lo = mid + 1; else hi = mid;
+    }
+    return NULL;
+}
+
+int builtin_prototype(Token name, char *buffer, size_t capacity) {
+    const Signature *row = find_signature(name);
+    if (!row) return 0;
+    char returns[64];
+    ct_type_name(return_type(row->type), returns, sizeof returns);
+    (void)snprintf(buffer, capacity, "%s %s(%s)", returns, row->name, row->parameters);
+    return 1;
 }
 
 int builtin_type(Token name, CtType *type) {
-    for (size_t i = 0; i < sizeof signatures / sizeof signatures[0]; ++i)
-        if (named(name, signatures[i].name)) { *type = return_type(signatures[i].type); return 1; }
-    return 0;
+    const Signature *row = find_signature(name);
+    if (!row) return 0;
+    *type = return_type(row->type);
+    return 1;
 }
 
 static int require_count(CtInterpreter *interpreter, Token name, size_t count) {
-    for (size_t i = 0; i < sizeof signatures / sizeof signatures[0]; ++i)
-        if (named(name, signatures[i].name)) {
-            if (signatures[i].arity == VARIADIC || signatures[i].arity == count) return 1;
-            break;
-        }
+    const Signature *row = find_signature(name);
+    if (row && (row->arity == VARIADIC || row->arity == count)) return 1;
     (void)runtime_error(interpreter, name, "incorrect number of library arguments");
     return 0;
 }
