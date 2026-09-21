@@ -85,6 +85,7 @@ CtValue runtime_invoke(CtInterpreter *interpreter, Token name, CtValue pointer, 
 /* Borrow the remaining promoted arguments, consuming the list for v* I/O. */
 int runtime_va_values(CtInterpreter *interpreter, Token name, CtValue list, const CtValue **values, size_t *count);
 int builtin_type(Token name, CtType *type);
+int builtin_resolve(Token name, size_t *id);
 size_t builtin_count(void);
 const char *builtin_name(size_t index);
 int builtin_prototype(Token name, char *buffer, size_t capacity);
@@ -92,6 +93,7 @@ int builtin_value(CtInterpreter *interpreter, Token name, CtValue *value);
 /* errno is a real object so that a program may assign to it. */
 int builtin_object(CtInterpreter *interpreter, Token name, uint64_t *address, CtType *type);
 void builtin_cleanup(CtInterpreter *interpreter);
-CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args, size_t count);
+CtValue builtin_call(CtInterpreter *interpreter, Token name, size_t id,
+                     const CtValue *args, size_t count);
 
 #endif

@@ -1,3 +1,4 @@
+#define CT_TYPES_IMPLEMENTATION
 #include "types.h"
 
 #include <limits.h>
@@ -6,9 +7,11 @@
 
 #define TYPE_LIMIT 4096
 
-static TypeInfo *table;
-static size_t table_count, table_capacity;
+TypeInfo *ct_type_table;
+size_t ct_type_table_count;
+static size_t table_capacity;
 static unsigned table_references;
+static CtType pointer_cache[TYPE_LIMIT]; /* stored as handle + 1; zero means absent */
 
 #define SCALAR(k, type, sign, order) \
     {.kind = (k), .size = sizeof(type), .align = sizeof(type), .is_signed = (sign), .rank = (order), .complete = 1}
@@ -34,38 +37,35 @@ static const TypeInfo scalars[] = {
 _Static_assert(sizeof(long long) <= sizeof(int64_t), "Cterpreter requires long long to fit in 64 bits");
 
 static int seed(void) {
-    if (table_count) return 1;
-    table = calloc(sizeof scalars / sizeof scalars[0], sizeof *table);
-    if (!table) return 0;
+    if (ct_type_table_count) return 1;
+    ct_type_table = calloc(sizeof scalars / sizeof scalars[0], sizeof *ct_type_table);
+    if (!ct_type_table) return 0;
     table_capacity = sizeof scalars / sizeof scalars[0];
-    memcpy(table, scalars, sizeof scalars);
-    table_count = table_capacity;
+    memcpy(ct_type_table, scalars, sizeof scalars);
+    ct_type_table_count = table_capacity;
     return 1;
 }
 
 static CtType append(TypeInfo info) {
-    if (!seed() || table_count >= TYPE_LIMIT) return CT_VOID;
-    if (table_count == table_capacity) {
+    if (!seed() || ct_type_table_count >= TYPE_LIMIT) return CT_VOID;
+    if (ct_type_table_count == table_capacity) {
         size_t capacity = table_capacity * 2;
-        TypeInfo *grown = realloc(table, capacity * sizeof *grown);
+        TypeInfo *grown = realloc(ct_type_table, capacity * sizeof *grown);
         if (!grown) return CT_VOID;
-        table = grown;
+        ct_type_table = grown;
         table_capacity = capacity;
     }
-    table[table_count] = info;
-    return (CtType)table_count++;
+    ct_type_table[ct_type_table_count] = info;
+    return (CtType)ct_type_table_count++;
 }
 
-const TypeInfo *type_info(CtType type) {
+const TypeInfo *type_info_slow(CtType type) {
     if (!seed()) return &scalars[TY_VOID];
-    if (type < 0 || (size_t)type >= table_count) return &scalars[TY_VOID];
-    return &table[type];
+    if (type < 0 || (size_t)type >= ct_type_table_count) return &scalars[TY_VOID];
+    return &ct_type_table[type];
 }
 
-TypeKind type_kind(CtType type) { return type_info(type)->kind; }
-size_t ct_type_size(CtType type) { return type_info(type)->size; }
-size_t ct_type_align(CtType type) { return type_info(type)->align; }
-CtType type_target(CtType type) { return type_info(type)->target; }
+size_t ct_type_size(CtType type) { return type_size(type); }
 
 CtType type_decay(CtType type) {
     const TypeInfo *info = type_info(type);
@@ -74,58 +74,26 @@ CtType type_decay(CtType type) {
     return type;
 }
 
-uint64_t type_mask(CtType type) {
-    size_t bits = ct_type_size(type) * CHAR_BIT;
-    return bits >= 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
-}
-
-int64_t type_maximum(CtType type) {
-    const TypeInfo *info = type_info(type);
-    uint64_t mask = type_mask(type);
-    return info->is_signed ? (int64_t)(mask >> 1) : (int64_t)mask;
-}
-
-int64_t type_minimum(CtType type) {
-    const TypeInfo *info = type_info(type);
-    return info->is_signed ? -type_maximum(type) - 1 : 0;
-}
-
-CtType type_promote(CtType type) {
-    const TypeInfo *info = type_info(type);
-    if (!type_is_integer(type) || info->rank >= type_info(CT_INT)->rank) return type;
-    /* Every narrower type fits in int here, so the promotion never goes unsigned. */
-    return CT_INT;
-}
-
-CtType type_common(CtType left, CtType right) {
-    if (type_kind(left) == TY_DOUBLE || type_kind(right) == TY_DOUBLE) return CT_DOUBLE;
-    if (type_kind(left) == TY_FLOAT || type_kind(right) == TY_FLOAT) return CT_FLOAT;
-    left = type_promote(left);
-    right = type_promote(right);
-    if (left == right) return left;
-    const TypeInfo *a = type_info(left), *b = type_info(right);
-    if (a->is_signed == b->is_signed) return a->rank > b->rank ? left : right;
-    CtType unsigned_type = a->is_signed ? right : left;
-    CtType signed_type = a->is_signed ? left : right;
-    if (type_info(unsigned_type)->rank >= type_info(signed_type)->rank) return unsigned_type;
-    if (ct_type_size(signed_type) > ct_type_size(unsigned_type)) return signed_type;
-    return (CtType)(signed_type + 1);
-}
-
 CtType type_pointer(CtType target) {
     if (!seed()) return CT_VOID;
-    for (size_t i = 0; i < table_count; ++i)
-        if (table[i].kind == TY_POINTER && table[i].target == target) return (CtType)i;
-    return append((TypeInfo){.kind = TY_POINTER, .target = target, .size = sizeof(uint64_t),
-                             .align = sizeof(uint64_t), .complete = 1});
+    if (target >= 0 && target < TYPE_LIMIT && pointer_cache[target]) return pointer_cache[target] - 1;
+    for (size_t i = 0; i < ct_type_table_count; ++i)
+        if (ct_type_table[i].kind == TY_POINTER && ct_type_table[i].target == target) {
+            if (target >= 0 && target < TYPE_LIMIT) pointer_cache[target] = (CtType)i + 1;
+            return (CtType)i;
+        }
+    CtType result = append((TypeInfo){.kind = TY_POINTER, .target = target, .size = sizeof(uint64_t),
+                                      .align = sizeof(uint64_t), .complete = 1});
+    if (result != CT_VOID && target >= 0 && target < TYPE_LIMIT) pointer_cache[target] = result + 1;
+    return result;
 }
 
 CtType type_array(CtType element, size_t count) {
     const TypeInfo *info = type_info(element);
     if (!info->complete || !info->size || count > TYPE_LIMIT * TYPE_LIMIT) return CT_VOID;
     if (count && info->size > (size_t)-1 / count) return CT_VOID;
-    for (size_t i = 0; i < table_count; ++i)
-        if (table[i].kind == TY_ARRAY && table[i].target == element && table[i].count == count) return (CtType)i;
+    for (size_t i = 0; i < ct_type_table_count; ++i)
+        if (ct_type_table[i].kind == TY_ARRAY && ct_type_table[i].target == element && ct_type_table[i].count == count) return (CtType)i;
     return append((TypeInfo){.kind = TY_ARRAY, .target = element, .count = count,
                              .size = info->size * count, .align = info->align, .complete = count != 0});
 }
@@ -139,9 +107,9 @@ static int same_parameters(const TypeInfo *info, const CtType *parameters, size_
 
 CtType type_function(CtType result, const CtType *parameters, size_t count, int variadic) {
     if (!seed()) return CT_VOID;
-    for (size_t i = 0; i < table_count; ++i)
-        if (table[i].kind == TY_FUNCTION && table[i].target == result &&
-            same_parameters(&table[i], parameters, count, variadic)) return (CtType)i;
+    for (size_t i = 0; i < ct_type_table_count; ++i)
+        if (ct_type_table[i].kind == TY_FUNCTION && ct_type_table[i].target == result &&
+            same_parameters(&ct_type_table[i], parameters, count, variadic)) return (CtType)i;
     CtType *copied = count ? malloc(count * sizeof *copied) : NULL;
     if (count && !copied) return CT_VOID;
     if (count) memcpy(copied, parameters, count * sizeof *copied);
@@ -165,15 +133,19 @@ CtType type_aggregate(int is_union, const char *tag, size_t tag_length) {
 }
 
 int type_add_member(CtType aggregate, const char *name, size_t length, CtType type) {
-    if (!seed() || aggregate <= CT_VOID || (size_t)aggregate >= table_count) return 0;
-    TypeInfo *info = &table[aggregate];
+    if (!seed() || aggregate <= CT_VOID || (size_t)aggregate >= ct_type_table_count) return 0;
+    TypeInfo *info = &ct_type_table[aggregate];
     const TypeInfo *member = type_info(type);
     if (info->complete || !member->complete || !member->size) return 0;
     if (type_member(aggregate, name, length)) return 0;
-    Member *members = realloc(info->members, (info->member_count + 1) * sizeof *members);
-    if (!members) return 0;
-    info->members = members;
-    Member *slot = &members[info->member_count];
+    if (info->member_count == info->member_capacity) {
+        size_t capacity = info->member_capacity ? info->member_capacity * 2 : 8;
+        Member *members = realloc(info->members, capacity * sizeof *members);
+        if (!members) return 0;
+        info->members = members;
+        info->member_capacity = capacity;
+    }
+    Member *slot = &info->members[info->member_count];
     slot->name = malloc(length + 1);
     if (!slot->name) return 0;
     memcpy(slot->name, name, length);
@@ -194,8 +166,8 @@ int type_add_member(CtType aggregate, const char *name, size_t length, CtType ty
 }
 
 int type_finish(CtType aggregate) {
-    if (!seed() || aggregate <= CT_VOID || (size_t)aggregate >= table_count) return 0;
-    TypeInfo *info = &table[aggregate];
+    if (!seed() || aggregate <= CT_VOID || (size_t)aggregate >= ct_type_table_count) return 0;
+    TypeInfo *info = &ct_type_table[aggregate];
     if (info->complete || !info->member_count) return 0;
     size_t padding = info->size % info->align;
     if (padding) info->size += info->align - padding;
@@ -215,7 +187,9 @@ typedef struct { char *data; size_t length, capacity; } Text;
 
 static void text_add(Text *text, const char *source, size_t length) {
     if (text->length + length + 1 > text->capacity) {
-        size_t capacity = text->length + length + 64;
+        size_t required = text->length + length + 1;
+        size_t capacity = text->capacity ? text->capacity : 64;
+        while (capacity < required) capacity *= 2;
         char *grown = realloc(text->data, capacity);
         if (!grown) return;
         text->data = grown;
@@ -329,13 +303,14 @@ void types_retain(void) { ++table_references; }
 
 void types_release(void) {
     if (!table_references || --table_references) return;
-    for (size_t i = 0; i < table_count; ++i) {
-        for (size_t j = 0; j < table[i].member_count; ++j) free(table[i].members[j].name);
-        free(table[i].members);
-        free(table[i].parameters);
-        free(table[i].tag);
+    for (size_t i = 0; i < ct_type_table_count; ++i) {
+        for (size_t j = 0; j < ct_type_table[i].member_count; ++j) free(ct_type_table[i].members[j].name);
+        free(ct_type_table[i].members);
+        free(ct_type_table[i].parameters);
+        free(ct_type_table[i].tag);
     }
-    free(table);
-    table = NULL;
-    table_count = table_capacity = 0;
+    free(ct_type_table);
+    ct_type_table = NULL;
+    ct_type_table_count = table_capacity = 0;
+    memset(pointer_cache, 0, sizeof pointer_cache);
 }

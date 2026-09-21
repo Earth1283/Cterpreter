@@ -50,6 +50,33 @@ static Token bad(Lexer *lexer, Token token, const char *message) {
     return token;
 }
 
+static int keyword_kind(const char *text, size_t length) {
+#define KEYWORD(word, kind) \
+    do { if (length == sizeof(word) - 1 && !memcmp(text, word, sizeof(word) - 1)) return kind; } while (0)
+    switch (*text) {
+        case '_': KEYWORD("_Alignof", TK_ALIGNOF); KEYWORD("_Bool", TK_BOOL); KEYWORD("_Generic", TK_GENERIC); break;
+        case 'a': KEYWORD("auto", TK_AUTO); break;
+        case 'b': KEYWORD("break", TK_BREAK); break;
+        case 'c': KEYWORD("case", TK_CASE); KEYWORD("char", TK_CHAR); KEYWORD("const", TK_CONST); KEYWORD("continue", TK_CONTINUE); break;
+        case 'd': KEYWORD("default", TK_DEFAULT); KEYWORD("do", TK_DO); KEYWORD("double", TK_DOUBLE); break;
+        case 'e': KEYWORD("else", TK_ELSE); KEYWORD("enum", TK_ENUM); KEYWORD("extern", TK_EXTERN); break;
+        case 'f': KEYWORD("float", TK_FLOAT); KEYWORD("for", TK_FOR); break;
+        case 'g': KEYWORD("goto", TK_GOTO); break;
+        case 'i': KEYWORD("if", TK_IF); KEYWORD("inline", TK_INLINE); KEYWORD("int", TK_INT); break;
+        case 'l': KEYWORD("long", TK_LONG); break;
+        case 'r': KEYWORD("register", TK_REGISTER); KEYWORD("restrict", TK_RESTRICT); KEYWORD("return", TK_RETURN); break;
+        case 's': KEYWORD("short", TK_SHORT); KEYWORD("signed", TK_SIGNED); KEYWORD("sizeof", TK_SIZEOF);
+                  KEYWORD("static", TK_STATIC); KEYWORD("struct", TK_STRUCT); KEYWORD("switch", TK_SWITCH); break;
+        case 't': KEYWORD("typedef", TK_TYPEDEF); break;
+        case 'u': KEYWORD("union", TK_UNION); KEYWORD("unsigned", TK_UNSIGNED); break;
+        case 'v': KEYWORD("void", TK_VOID); KEYWORD("volatile", TK_VOLATILE); break;
+        case 'w': KEYWORD("while", TK_WHILE); break;
+        default: break;
+    }
+#undef KEYWORD
+    return TK_NAME;
+}
+
 Token lexer_next(Lexer *lexer) {
     for (;;) {
         while (isspace((unsigned char)*lexer->cursor)) advance(lexer);
@@ -101,24 +128,7 @@ Token lexer_next(Lexer *lexer) {
     if (isalpha(first) || first == '_') {
         do { advance(lexer); } while (isalnum((unsigned char)*lexer->cursor) || *lexer->cursor == '_');
         token.length = (size_t)(lexer->cursor - token.start);
-        token.kind = TK_NAME;
-        static const struct { const char *name; int kind; } keywords[] = {
-            {"int", TK_INT}, {"double", TK_DOUBLE}, {"void", TK_VOID},
-            {"if", TK_IF}, {"else", TK_ELSE}, {"while", TK_WHILE},
-            {"for", TK_FOR}, {"return", TK_RETURN}, {"break", TK_BREAK},
-            {"continue", TK_CONTINUE}, {"char", TK_CHAR}, {"do", TK_DO},
-            {"sizeof", TK_SIZEOF}, {"_Alignof", TK_ALIGNOF}, {"static", TK_STATIC},
-            {"const", TK_CONST}, {"switch", TK_SWITCH}, {"case", TK_CASE},
-            {"default", TK_DEFAULT}, {"goto", TK_GOTO}, {"typedef", TK_TYPEDEF}, {"enum", TK_ENUM},
-            {"_Generic", TK_GENERIC}, {"struct", TK_STRUCT}, {"union", TK_UNION},
-            {"signed", TK_SIGNED}, {"unsigned", TK_UNSIGNED}, {"short", TK_SHORT},
-            {"long", TK_LONG}, {"float", TK_FLOAT}, {"_Bool", TK_BOOL},
-            {"volatile", TK_VOLATILE}, {"restrict", TK_RESTRICT}, {"extern", TK_EXTERN},
-            {"register", TK_REGISTER}, {"inline", TK_INLINE}, {"auto", TK_AUTO}
-        };
-        for (size_t i = 0; i < sizeof keywords / sizeof keywords[0]; ++i)
-            if (strlen(keywords[i].name) == token.length &&
-                !memcmp(token.start, keywords[i].name, token.length)) token.kind = keywords[i].kind;
+        token.kind = keyword_kind(token.start, token.length);
         return token;
     }
     if (isdigit(first) || (first == '.' && isdigit((unsigned char)lexer->cursor[1]))) {

@@ -71,7 +71,20 @@ static int append(Buffer *buffer, int character) {
 }
 
 static int append_text(Buffer *buffer, const char *text) {
-    while (*text) if (!append(buffer, (unsigned char)*text++)) return 0;
+    size_t length = strlen(text);
+    if (length > CT_SOURCE_LIMIT - buffer->length) return 0;
+    size_t needed = buffer->length + length + 1;
+    if (needed > buffer->capacity) {
+        size_t capacity = buffer->capacity ? buffer->capacity : 256;
+        while (capacity < needed && capacity < CT_SOURCE_LIMIT + 1) capacity *= 2;
+        if (capacity > CT_SOURCE_LIMIT + 1) capacity = CT_SOURCE_LIMIT + 1;
+        char *data = realloc(buffer->data, capacity);
+        if (!data) return 0;
+        buffer->data = data;
+        buffer->capacity = capacity;
+    }
+    memcpy(buffer->data + buffer->length, text, length + 1);
+    buffer->length += length;
     return 1;
 }
 

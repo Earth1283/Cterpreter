@@ -24,17 +24,21 @@ struct Node {
     CtType type;
     char *text;
     size_t text_length;
-    int is_static, is_const, terminated, tag_kind, local, through_pointer, variadic;
+    int is_static, is_const, terminated, tag_kind, local, through_pointer, variadic, builtin_id;
     uint64_t address;
     Node *left, *right, *third, *fourth, *next;
     Node *allocated_next;
+    Node *alias_next;
 };
 
 typedef struct Unit Unit;
+typedef struct NodeBlock NodeBlock;
 struct Unit {
     char *source;
     Node *statements;
     Node *allocations;
+    Node *aliases;
+    NodeBlock *node_blocks;
     Unit *next;
     int has_functions;
 };

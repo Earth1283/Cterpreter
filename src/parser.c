@@ -9,6 +9,13 @@
 #define TAG_CONSTANT 4
 #define SUFFIX_LIMIT 8
 #define TYPE_LIMIT 4096
+#define NODES_PER_BLOCK 128
+
+struct NodeBlock {
+    NodeBlock *next;
+    size_t used;
+    Node nodes[NODES_PER_BLOCK];
+};
 
 typedef struct Alias Alias;
 struct Alias { Node *node; unsigned scope; Alias *next; };
@@ -64,12 +71,18 @@ static Node *node(Parser *parser, NodeKind kind, Token token) {
         parser->status = CT_ERROR;
         return NULL;
     }
-    Node *result = calloc(1, sizeof *result);
-    if (!result) {
-        fail(parser, "out of memory");
-        parser->status = CT_ERROR;
-        return NULL;
+    NodeBlock *block = parser->unit->node_blocks;
+    if (!block || block->used == NODES_PER_BLOCK) {
+        block = calloc(1, sizeof *block);
+        if (!block) {
+            fail(parser, "out of memory");
+            parser->status = CT_ERROR;
+            return NULL;
+        }
+        block->next = parser->unit->node_blocks;
+        parser->unit->node_blocks = block;
     }
+    Node *result = &block->nodes[block->used++];
     result->kind = kind;
     result->token = token;
     result->allocated_next = parser->unit->allocations;
@@ -126,9 +139,8 @@ static Node *find_alias(Parser *parser, Token token, int tag_kind, int current_s
     }
     if (current_scope_only && parser->scope) return NULL;
     for (const Unit *unit = parser->previous; unit; unit = unit->next)
-        for (Node *entry = unit->allocations; entry; entry = entry->allocated_next)
-            if ((entry->kind == N_TYPEDEF || entry->kind == N_ENUMERATOR) && !entry->local &&
-                entry->tag_kind == tag_kind && same_name(entry->token, token)) return entry;
+        for (Node *entry = unit->aliases; entry; entry = entry->alias_next)
+            if (entry->tag_kind == tag_kind && same_name(entry->token, token)) return entry;
     return NULL;
 }
 
@@ -136,6 +148,10 @@ static void declare_alias(Parser *parser, Node *entry) {
     Alias *alias = calloc(1, sizeof *alias);
     if (!alias) { fail(parser, "out of memory"); parser->status = CT_ERROR; return; }
     entry->local = parser->scope != 0;
+    if (!entry->local) {
+        entry->alias_next = parser->unit->aliases;
+        parser->unit->aliases = entry;
+    }
     alias->node = entry;
     alias->scope = parser->scope;
     alias->next = parser->aliases;
@@ -269,7 +285,7 @@ static void skip_parenthesized(Parser *parser) {
 
 typedef struct {
     int function, sized, variadic;
-    size_t count, parameter_count;
+    size_t count, parameter_count, parameter_capacity;
     CtType *parameters;
     Node *nodes;
 } Suffix;
@@ -297,9 +313,13 @@ static void parameter_list(Parser *parser, Suffix *suffix) {
         CtType type = type_decay(declarator(parser, base, &name, NULL, NULL));
         if (parser->status != CT_OK) return;
         if (!type_info(type)->complete || !ct_type_size(type)) { fail(parser, "parameter has an incomplete type"); break; }
-        CtType *grown = realloc(suffix->parameters, (suffix->parameter_count + 1) * sizeof *grown);
-        if (!grown) { fail(parser, "out of memory"); parser->status = CT_ERROR; break; }
-        suffix->parameters = grown;
+        if (suffix->parameter_count == suffix->parameter_capacity) {
+            size_t capacity = suffix->parameter_capacity ? suffix->parameter_capacity * 2 : 4;
+            CtType *grown = realloc(suffix->parameters, capacity * sizeof *grown);
+            if (!grown) { fail(parser, "out of memory"); parser->status = CT_ERROR; break; }
+            suffix->parameters = grown;
+            suffix->parameter_capacity = capacity;
+        }
         suffix->parameters[suffix->parameter_count++] = type;
         Node *parameter = node(parser, N_DECLARATION, name);
         if (!parameter) break;
@@ -1041,8 +1061,12 @@ void unit_destroy(Unit *unit) {
     while (node_to_free) {
         Node *next_node = node_to_free->allocated_next;
         free(node_to_free->text);
-        free(node_to_free);
         node_to_free = next_node;
+    }
+    while (unit->node_blocks) {
+        NodeBlock *next = unit->node_blocks->next;
+        free(unit->node_blocks);
+        unit->node_blocks = next;
     }
     free(unit->source);
     free(unit);

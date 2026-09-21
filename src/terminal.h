@@ -6,7 +6,7 @@
 
 typedef struct {
     char **history;
-    size_t count;
+    size_t count, capacity;
     const char *history_path;
     int color, highlighting, suggestions;
     const char *context;

@@ -28,9 +28,14 @@ static void history_add(Terminal *terminal, const char *text) {
         memmove(terminal->history, terminal->history + 1, 999 * sizeof *terminal->history);
         --terminal->count;
     }
-    char **history = realloc(terminal->history, (terminal->count + 1) * sizeof *history);
-    if (!history) return;
-    terminal->history = history;
+    if (terminal->count == terminal->capacity) {
+        size_t capacity = terminal->capacity ? terminal->capacity * 2 : 64;
+        if (capacity > 1000) capacity = 1000;
+        char **history = realloc(terminal->history, capacity * sizeof *history);
+        if (!history) return;
+        terminal->history = history;
+        terminal->capacity = capacity;
+    }
     char *entry = duplicate(text);
     if (entry) terminal->history[terminal->count++] = entry;
 }

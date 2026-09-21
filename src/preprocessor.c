@@ -58,9 +58,29 @@ static const char *spaces(const char *text) { while (*text && isspace((unsigned 
 static int identifier(int c) { return isalnum((unsigned char)c) || c == '_'; }
 static const char *name_end(const char *text) { while (identifier(*text)) ++text; return text; }
 
+static uint64_t name_hash(const char *name, size_t length) {
+    uint64_t hash = UINT64_C(1469598103934665603);
+    for (size_t i = 0; i < length; ++i) {
+        hash ^= (unsigned char)name[i];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+static void insert(Preprocessor *preprocessor, Macro *macro) {
+    size_t slot = (size_t)(macro->hash & (PREPROCESSOR_BUCKETS - 1));
+    macro->next = preprocessor->macros;
+    preprocessor->macros = macro;
+    macro->bucket_next = preprocessor->buckets[slot];
+    preprocessor->buckets[slot] = macro;
+}
+
 static Macro *find(Preprocessor *preprocessor, const char *name, size_t length) {
-    for (Macro *macro = preprocessor->macros; macro; macro = macro->next)
-        if (strlen(macro->name) == length && !memcmp(macro->name, name, length)) return macro;
+    uint64_t hash = name_hash(name, length);
+    size_t slot = (size_t)(hash & (PREPROCESSOR_BUCKETS - 1));
+    for (Macro *macro = preprocessor->buckets[slot]; macro; macro = macro->bucket_next)
+        if (macro->hash == hash && macro->name_length == length && !memcmp(macro->name, name, length))
+            return macro;
     return NULL;
 }
 
@@ -73,10 +93,24 @@ static void macro_destroy(Macro *macro) {
 }
 
 static void undefine(Preprocessor *preprocessor, const char *name, size_t length) {
+    uint64_t hash = name_hash(name, length);
+    size_t slot = (size_t)(hash & (PREPROCESSOR_BUCKETS - 1));
+    Macro *target = NULL;
+    Macro **bucket = &preprocessor->buckets[slot];
+    while (*bucket) {
+        Macro *macro = *bucket;
+        if (macro->hash == hash && macro->name_length == length && !memcmp(macro->name, name, length)) {
+            *bucket = macro->bucket_next;
+            target = macro;
+            break;
+        }
+        bucket = &macro->bucket_next;
+    }
+    if (!target) return;
     Macro **link = &preprocessor->macros;
     while (*link) {
         Macro *macro = *link;
-        if (strlen(macro->name) == length && !memcmp(macro->name, name, length)) {
+        if (macro == target) {
             *link = macro->next;
             macro_destroy(macro);
             return;
@@ -93,8 +127,7 @@ void preprocessor_destroy(Preprocessor *preprocessor) {
     }
     for (size_t i = 0; i < preprocessor->once_count; ++i) free(preprocessor->once[i]);
     free(preprocessor->once);
-    preprocessor->once = NULL;
-    preprocessor->once_count = 0;
+    *preprocessor = (Preprocessor){0};
 }
 
 int preprocessor_copy(Preprocessor *target, const Preprocessor *source) {
@@ -110,18 +143,25 @@ int preprocessor_copy(Preprocessor *target, const Preprocessor *source) {
     for (Macro *macro = source->macros; macro; macro = macro->next) {
         Macro *item = calloc(1, sizeof *item);
         if (!item) goto failed;
-        item->next = target->macros;
-        target->macros = item;
         item->name = copy(macro->name, strlen(macro->name));
         item->body = copy(macro->body, strlen(macro->body));
         item->function = macro->function;
         item->variadic = macro->variadic;
         item->parameters = macro->count ? calloc(macro->count, sizeof *item->parameters) : NULL;
-        if (!item->name || !item->body || (macro->count && !item->parameters)) goto failed;
+        if (!item->name || !item->body || (macro->count && !item->parameters)) {
+            macro_destroy(item);
+            goto failed;
+        }
         for (size_t i = 0; i < macro->count; ++i) {
             item->parameters[item->count++] = copy(macro->parameters[i], strlen(macro->parameters[i]));
-            if (!item->parameters[i]) goto failed;
+            if (!item->parameters[i]) {
+                macro_destroy(item);
+                goto failed;
+            }
         }
+        item->name_length = macro->name_length;
+        item->hash = macro->hash;
+        insert(target, item);
     }
     return 1;
 failed:
@@ -330,8 +370,11 @@ static void define(Expansion *expansion, const char *source) {
     const char *end = name_end(source);
     if (end == source || isdigit((unsigned char)*source)) { fail(expansion, "invalid macro name"); return; }
     Macro *macro = calloc(1, sizeof *macro);
+    size_t parameter_capacity = 0;
     if (!macro) { fail(expansion, "out of memory"); return; }
     macro->name = copy(source, (size_t)(end - source));
+    macro->name_length = (size_t)(end - source);
+    macro->hash = name_hash(source, macro->name_length);
     if (*end == '(') {
         macro->function = 1;
         source = spaces(end + 1);
@@ -339,9 +382,13 @@ static void define(Expansion *expansion, const char *source) {
             int variadic = !strncmp(source, "...", 3);
             end = variadic ? source + 3 : name_end(source);
             if (end == source) { fail(expansion, "invalid macro parameter"); break; }
-            char **parameters = realloc(macro->parameters, (macro->count + 1) * sizeof *parameters);
-            if (!parameters) { fail(expansion, "out of memory"); break; }
-            macro->parameters = parameters;
+            if (macro->count == parameter_capacity) {
+                size_t capacity = parameter_capacity ? parameter_capacity * 2 : 4;
+                char **parameters = realloc(macro->parameters, capacity * sizeof *parameters);
+                if (!parameters) { fail(expansion, "out of memory"); break; }
+                macro->parameters = parameters;
+                parameter_capacity = capacity;
+            }
             macro->parameters[macro->count] = variadic ? copy("__VA_ARGS__", 11) : copy(source, (size_t)(end - source));
             if (!macro->parameters[macro->count++]) { fail(expansion, "out of memory"); break; }
             macro->variadic = variadic;
@@ -357,8 +404,7 @@ static void define(Expansion *expansion, const char *source) {
     if (!macro->name || !macro->body) fail(expansion, "out of memory");
     if (expansion->failed) { macro_destroy(macro); return; }
     undefine(expansion->preprocessor, macro->name, strlen(macro->name));
-    macro->next = expansion->preprocessor->macros;
-    expansion->preprocessor->macros = macro;
+    insert(expansion->preprocessor, macro);
 }
 
 static int condition(Expansion *expansion, const char *source) {

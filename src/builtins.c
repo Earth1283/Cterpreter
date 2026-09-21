@@ -12,6 +12,7 @@
 
 #define CHAR_POINTER type_pointer(CT_CHAR)
 #define VOID_POINTER type_pointer(CT_VOID)
+#define INLINE_ARGUMENTS 4
 
 typedef enum { RT_INT, RT_LONG, RT_ULONG, RT_DOUBLE, RT_VOID, RT_CHAR_POINTER, RT_VOID_POINTER } ReturnKind;
 
@@ -33,6 +34,23 @@ static CtType return_type(ReturnKind kind) {
 #define VARIADIC 255
 
 typedef struct { const char *name; ReturnKind type; unsigned char arity; const char *parameters; } Signature;
+
+/* Stable positions in signatures[]. Ranges let the call dispatcher jump
+ * straight to a function family after its one binary-search lookup. */
+enum {
+    BI_PRINTF = 0, BI_FPRINTF = 3,
+    BI_SCANF = 4, BI_FSCANF = 6,
+    BI_VPRINTF = 7, BI_VFSCANF = 13,
+    BI_FOPEN = 18, BI_STRERROR = 39,
+    BI_MALLOC = 40, BI_FREE = 43,
+    BI_STRLEN = 44, BI_STRPBRK = 56, BI_STRTOK = 57,
+    BI_MEMCPY = 58, BI_MEMCHR = 62,
+    BI_ATOI = 63, BI_ATOF = 65, BI_STRTOL = 66, BI_STRTOD = 67,
+    BI_QSORT = 72, BI_BSEARCH = 73,
+    BI_SQRT = 76, BI_COPYSIGN = 108,
+    BI_ISDIGIT = 112, BI_TOLOWER = 125,
+    BI_COUNT = 129
+};
 
 static const Signature signatures[] = {
     {"printf", RT_INT, VARIADIC, "const char *format, ..."},
@@ -166,6 +184,8 @@ static const Signature signatures[] = {
     {"interpret_depth", RT_INT, 0, "void"}
 };
 
+_Static_assert(BI_COUNT == sizeof signatures / sizeof signatures[0], "builtin ids must match signatures");
+
 size_t builtin_count(void) { return sizeof signatures / sizeof signatures[0]; }
 
 const char *builtin_name(size_t index) {
@@ -222,6 +242,13 @@ int builtin_type(Token name, CtType *type) {
     const Signature *row = find_signature(name);
     if (!row) return 0;
     *type = return_type(row->type);
+    return 1;
+}
+
+int builtin_resolve(Token name, size_t *id) {
+    const Signature *row = find_signature(name);
+    if (!row) return 0;
+    *id = (size_t)(row - signatures);
     return 1;
 }
 
@@ -531,7 +558,9 @@ static CtValue formatted(CtInterpreter *interpreter, Token name, const CtValue *
         else if (integer_conversion) required = snprintf(NULL, 0, spec, (uintmax_t)unsigned_value);
         else required = snprintf(NULL, 0, spec, real_value);
         if (required < 0 || required > (int)CT_SOURCE_LIMIT) { (void)runtime_error(interpreter, name, "formatted output limit exceeded"); break; }
-        char *piece = malloc((size_t)required + 1);
+        char inline_piece[128];
+        char *piece = (size_t)required < sizeof inline_piece
+            ? inline_piece : malloc((size_t)required + 1);
         if (!piece) { (void)runtime_error(interpreter, name, "out of memory"); break; }
         if (conversion == 's') (void)snprintf(piece, (size_t)required + 1, spec, text);
         else if (conversion == 'c') (void)snprintf(piece, (size_t)required + 1, spec, (int)signed_value);
@@ -539,7 +568,7 @@ static CtValue formatted(CtInterpreter *interpreter, Token name, const CtValue *
         else if (integer_conversion) (void)snprintf(piece, (size_t)required + 1, spec, (uintmax_t)unsigned_value);
         else (void)snprintf(piece, (size_t)required + 1, spec, real_value);
         if (!append(&output, piece, (size_t)required)) (void)runtime_error(interpreter, name, "formatted output limit exceeded");
-        free(piece);
+        if (piece != inline_piece) free(piece);
     }
     int result = (int)output.size;
     if (!interpreter->failed) {
@@ -874,7 +903,9 @@ static CtValue va_formatted(CtInterpreter *interpreter, Token name, const CtValu
     const CtValue *remaining = NULL;
     size_t extra = 0, fixed = count - 1;
     if (!runtime_va_values(interpreter, name, args[fixed], &remaining, &extra)) return integer(0);
-    CtValue *values = malloc((fixed + extra) * sizeof *values);
+    size_t total = fixed + extra;
+    CtValue inline_values[INLINE_ARGUMENTS];
+    CtValue *values = total <= INLINE_ARGUMENTS ? inline_values : malloc(total * sizeof *values);
     if (!values) return runtime_error(interpreter, name, "out of memory");
     memcpy(values, args, fixed * sizeof *values);
     if (extra) memcpy(values + fixed, remaining, extra * sizeof *values);
@@ -886,22 +917,26 @@ static CtValue va_formatted(CtInterpreter *interpreter, Token name, const CtValu
     int input = named(base, "scanf") || named(base, "sscanf") || named(base, "fscanf");
     CtValue result = input ? scanned(interpreter, base, values, fixed + extra)
                            : formatted(interpreter, base, values, fixed + extra);
-    free(values);
+    if (values != inline_values) free(values);
     return result;
 }
 
-CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args, size_t count) {
-    if (named(name, "vprintf") || named(name, "vsprintf") || named(name, "vsnprintf") || named(name, "vfprintf") ||
-        named(name, "vscanf") || named(name, "vsscanf") || named(name, "vfscanf")) return va_formatted(interpreter, name, args, count);
-    if (named(name, "printf") || named(name, "sprintf") || named(name, "snprintf") || named(name, "fprintf")) return formatted(interpreter, name, args, count);
-    if (named(name, "scanf") || named(name, "sscanf") || named(name, "fscanf")) return scanned(interpreter, name, args, count);
-    if (named(name, "fopen") || named(name, "fclose") || named(name, "fflush") || named(name, "fgetc") ||
-        named(name, "fputc") || named(name, "fputs") || named(name, "fgets") || named(name, "fread") ||
-        named(name, "fwrite") || named(name, "fseek") || named(name, "ftell") || named(name, "rewind") ||
-        named(name, "feof") || named(name, "ferror") || named(name, "clearerr") || named(name, "remove") ||
-        named(name, "rename") || named(name, "getenv") || named(name, "strerror") ||
-        named(name, "getc") || named(name, "putc") || named(name, "ungetc")) return file_call(interpreter, name, args, count);
-    if (!require_count(interpreter, name, count)) return integer(0);
+CtValue builtin_call(CtInterpreter *interpreter, Token name, size_t id,
+                     const CtValue *args, size_t count) {
+    const Signature *signature = id < builtin_count() ? &signatures[id] : NULL;
+    if (!signature || (signature->arity != VARIADIC && signature->arity != count))
+        return runtime_error(interpreter, name, "incorrect number of library arguments");
+    if (id >= BI_VPRINTF && id <= BI_VFSCANF) return va_formatted(interpreter, name, args, count);
+    if (id <= BI_FPRINTF) return formatted(interpreter, name, args, count);
+    if (id >= BI_SCANF && id <= BI_FSCANF) return scanned(interpreter, name, args, count);
+    if (id >= BI_FOPEN && id <= BI_STRERROR) return file_call(interpreter, name, args, count);
+    if ((id >= BI_STRLEN && id <= BI_STRPBRK) || (id >= BI_ATOI && id <= BI_ATOF)) goto string_functions;
+    if (id >= BI_MEMCPY && id <= BI_MEMCHR) goto memory_functions;
+    if (id == BI_STRTOL || id == BI_STRTOD) goto number_conversion;
+    if (id == BI_STRTOK) goto tokenize;
+    if (id == BI_QSORT || id == BI_BSEARCH) goto search_functions;
+    if (id >= BI_ISDIGIT && id <= BI_TOLOWER) goto character_functions;
+    if (id >= BI_SQRT && id <= BI_COPYSIGN) goto math_functions;
     if (named(name, "getchar")) return integer(fgetc(interpreter->input));
     if (named(name, "clock")) return integer_of(CT_LONG, (int64_t)clock());
     if (named(name, "rand")) {
@@ -946,6 +981,7 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
             size_t copied = old->size < size ? old->size : size;
             memcpy(target->data, old->data, copied);
             memcpy(target->initialized, old->initialized, copied);
+            target->fully_initialized = old->fully_initialized && copied == size;
             (void)memory_release(&interpreter->memory, old_address, 1);
         }
         return (CtValue){.type = VOID_POINTER, .as.address = address};
@@ -956,6 +992,7 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
             return runtime_error(interpreter, name, interpreter->memory.error);
         return (CtValue){.type = CT_VOID};
     }
+string_functions:
     if (named(name, "strlen") || named(name, "strcmp") || named(name, "strncmp") || named(name, "strcpy") ||
         named(name, "strncpy") || named(name, "strcat") || named(name, "strncat") || named(name, "strchr") ||
         named(name, "strrchr") || named(name, "strstr") || named(name, "strspn") || named(name, "strcspn") ||
@@ -1015,6 +1052,7 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
         }
         return (CtValue){.type = CHAR_POINTER, .as.address = address};
     }
+memory_functions:
     if (named(name, "memchr")) {
         uint64_t address = pointer(interpreter, name, args[0]);
         int character = small(interpreter, name, args[1]);
@@ -1063,6 +1101,7 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
         (void)snprintf(message, sizeof message, "assertion failed: %s (%s:%d)", expression, file, line);
         return runtime_error(interpreter, name, message);
     }
+number_conversion:
     if (named(name, "strtol") || named(name, "strtod")) {
         char *text = string(interpreter, name, args[0]);
         int base = named(name, "strtol") ? small(interpreter, name, args[2]) : 0;
@@ -1085,6 +1124,7 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
         if (named(name, "strtod")) return (CtValue){.type = CT_DOUBLE, .as.real = real_result};
         return integer_of(CT_LONG, integer_result);
     }
+tokenize:
     if (named(name, "strtok")) {
         char *separators = string(interpreter, name, args[1]);
         uint64_t address = args[0].type == CT_INT && !args[0].as.integer ? 0 : pointer(interpreter, name, args[0]);
@@ -1103,6 +1143,7 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
         } else interpreter->token_state = 0;
         return (CtValue){.type = CHAR_POINTER, .as.address = address + start};
     }
+search_functions:
     if (named(name, "qsort") || named(name, "bsearch")) {
         int searching = named(name, "bsearch");
         uint64_t base = pointer(interpreter, name, args[searching]);
@@ -1160,6 +1201,7 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
         if (value == INT_MIN) return runtime_error(interpreter, name, "abs result overflows int");
         return integer_of(named(name, "labs") ? CT_LONG : CT_INT, abs(value));
     }
+character_functions:
     if ((name.length >= 2 && !memcmp(name.start, "is", 2)) || named(name, "toupper") || named(name, "tolower")) {
         int value = small(interpreter, name, args[0]);
         if (value != EOF && (value < 0 || value > UCHAR_MAX)) return runtime_error(interpreter, name, "ctype requires an unsigned char or EOF");
@@ -1178,6 +1220,8 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, const CtValue *args
         if (named(name, "isblank")) return integer(value == ' ' || value == '\t');
         return integer(named(name, "toupper") ? toupper(value) : tolower(value));
     }
+math_functions:
+    (void)0;
     double a = real_number(interpreter, name, args[0]);
     double b = count == 2 ? real_number(interpreter, name, args[1]) : 0.0;
     if (interpreter->failed) return integer(0);

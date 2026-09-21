@@ -15,6 +15,8 @@ typedef enum { FLOW_NORMAL, FLOW_RETURN, FLOW_BREAK, FLOW_CONTINUE, FLOW_GOTO } 
 typedef struct { Flow flow; CtValue value; int has_value; Token target; } Execution;
 typedef struct { uint64_t address; CtType type; int readonly; } Lvalue;
 
+#define INLINE_ARGUMENTS 4
+
 static CtValue integer(int64_t value) { return (CtValue){.type = CT_INT, .as.integer = value}; }
 
 static double as_real(CtValue value) {
@@ -359,8 +361,10 @@ static int base_operator(int kind) {
 
 static CtValue integer_operation(CtInterpreter *interpreter, Token token, int kind,
                                  CtValue left, CtValue right, CtType type) {
-    if (type_is_signed(type)) {
+    const TypeInfo *info = type_info(type);
+    if (info->is_signed) {
         int64_t a = left.as.integer, b = right.as.integer, value = 0;
+        int64_t minimum = type_minimum(type), maximum = type_maximum(type);
         int overflowed = 0;
         switch (kind) {
             case '+': overflowed = add_overflows(a, b, &value); break;
@@ -368,7 +372,7 @@ static CtValue integer_operation(CtInterpreter *interpreter, Token token, int ki
             case '*': overflowed = multiply_overflows(a, b, &value); break;
             case '/': case '%':
                 if (!b) return runtime_error(interpreter, token, "division by zero");
-                if (a == type_minimum(type) && b == -1) return runtime_error(interpreter, token, "signed integer overflow");
+                if (a == minimum && b == -1) return runtime_error(interpreter, token, "signed integer overflow");
                 value = kind == '/' ? a / b : a % b;
                 break;
             case '&': value = a & b; break;
@@ -376,7 +380,7 @@ static CtValue integer_operation(CtInterpreter *interpreter, Token token, int ki
             case '^': value = a ^ b; break;
             default: return runtime_error(interpreter, token, "unsupported operator");
         }
-        if (overflowed || value < type_minimum(type) || value > type_maximum(type))
+        if (overflowed || value < minimum || value > maximum)
             return runtime_error(interpreter, token, "signed integer overflow");
         return wrap(type, (uint64_t)value);
     }
@@ -461,12 +465,14 @@ static CtValue binary(CtInterpreter *interpreter, Token token, CtValue left, CtV
     int kind = base_operator(token.kind);
     if (left.type == CT_VOID || right.type == CT_VOID)
         return runtime_error(interpreter, token, "operator cannot use a void value");
-    if (type_is_aggregate(left.type) || type_is_aggregate(right.type))
+    TypeKind left_kind = type_kind(left.type), right_kind = type_kind(right.type);
+    if (left_kind == TY_STRUCT || left_kind == TY_UNION || right_kind == TY_STRUCT || right_kind == TY_UNION)
         return runtime_error(interpreter, token, "operator cannot use an aggregate value");
-    if (type_is_pointer(left.type) || type_is_pointer(right.type))
+    if (left_kind == TY_POINTER || right_kind == TY_POINTER)
         return pointer_operation(interpreter, token, kind, left, right);
     if (kind == TK_SHL || kind == TK_SHR) return shift_operation(interpreter, token, kind, left, right);
-    CtType type = type_common(left.type, right.type);
+    CtType type = left.type == right.type && left_kind >= TY_INT && left_kind <= TY_DOUBLE
+        ? left.type : type_common(left.type, right.type);
     left = as_type(left, type);
     right = as_type(right, type);
     if (type_is_real(type)) {
@@ -560,6 +566,7 @@ static CtType object_type(CtInterpreter *interpreter, Node *node, unsigned depth
             return type_target(type);
         }
         case N_MEMBER: {
+            if (node->address) return node->type;
             CtType type = expression_type(interpreter, node->left, depth + 1);
             if (node->through_pointer) {
                 if (!type_is_pointer(type)) break;
@@ -567,6 +574,8 @@ static CtType object_type(CtInterpreter *interpreter, Node *node, unsigned depth
             }
             const Member *member = type_member(type, node->token.start, node->token.length);
             if (!member) break;
+            node->type = member->type;
+            node->address = member->offset + 1;
             return member->type;
         }
         default: break;
@@ -842,9 +851,13 @@ static Lvalue lvalue(CtInterpreter *interpreter, Node *node) {
                 (void)runtime_error(interpreter, node->token, "member access requires a struct or union");
                 return result;
             }
-            const Member *member = type_member(type, node->token.start, node->token.length);
-            if (!member) { (void)runtime_error(interpreter, node->token, "unknown member"); return result; }
-            return (Lvalue){object.as.address + member->offset, member->type, 0};
+            if (!node->address) {
+                const Member *member = type_member(type, node->token.start, node->token.length);
+                if (!member) { (void)runtime_error(interpreter, node->token, "unknown member"); return result; }
+                node->type = member->type;
+                node->address = member->offset + 1;
+            }
+            return (Lvalue){object.as.address + node->address - 1, node->type, 0};
         }
         case N_INDEX: case N_UNARY: {
             CtValue pointer;
@@ -1003,10 +1016,16 @@ static CtValue invoke(CtInterpreter *interpreter, Token name, Node *function, co
     interpreter->scope = &frame;
     VaFrame arguments = {.function = function, .scope = &frame, .count = count - parameters,
                          .parent = interpreter->va_frame};
+    CtValue inline_variadic[INLINE_ARGUMENTS];
+    int heap_variadic = 0;
     interpreter->va_frame = &arguments;
     if (function->variadic) {
         arguments.identity = temporary_object(interpreter, &frame, name, 1);
-        arguments.values = arguments.count ? calloc(arguments.count, sizeof *arguments.values) : NULL;
+        if (arguments.count <= INLINE_ARGUMENTS) arguments.values = inline_variadic;
+        else {
+            arguments.values = malloc(arguments.count * sizeof *arguments.values);
+            heap_variadic = 1;
+        }
         if (arguments.count && !arguments.values) (void)runtime_error(interpreter, name, "out of memory");
         for (size_t i = 0; i < arguments.count && !interpreter->failed; ++i) {
             CtValue value = values[parameters + i];
@@ -1047,7 +1066,7 @@ static CtValue invoke(CtInterpreter *interpreter, Token name, Node *function, co
     scope_clear(interpreter, &frame);
     interpreter->scope = caller;
     interpreter->va_frame = arguments.parent;
-    free(arguments.values);
+    if (heap_variadic) free(arguments.values);
     return result;
 }
 
@@ -1070,12 +1089,20 @@ static CtValue call(CtInterpreter *interpreter, Node *node) {
     Node *callee = node->left;
     Node *function = NULL;
     Token name = callee && callee->kind == N_NAME ? callee->token : node->token;
-    CtType native_type;
     int native = 0;
+    size_t builtin = 0;
     if (callee && callee->kind == N_NAME) {
         Symbol *symbol = lookup(interpreter->scope, callee->token, 0);
         if (symbol && symbol->function) function = symbol->function;
-        else if (!symbol) native = builtin_type(callee->token, &native_type);
+        else if (!symbol) {
+            if (node->builtin_id) {
+                builtin = (size_t)(node->builtin_id - 1);
+                native = 1;
+            } else if (builtin_resolve(callee->token, &builtin)) {
+                node->builtin_id = (int)builtin + 1;
+                native = 1;
+            }
+        }
     }
     if (!function && !native) {
         CtValue pointer = evaluate(interpreter, callee);
@@ -1087,16 +1114,17 @@ static CtValue call(CtInterpreter *interpreter, Node *node) {
     }
     size_t arguments = 0;
     for (Node *a = node->right; a; a = a->next) ++arguments;
-    CtValue *values = arguments ? malloc(arguments * sizeof *values) : NULL;
+    CtValue inline_values[INLINE_ARGUMENTS];
+    CtValue *values = arguments <= INLINE_ARGUMENTS ? inline_values : malloc(arguments * sizeof *values);
     if (arguments && !values) return runtime_error(interpreter, name, "out of memory");
     size_t index = 0;
     for (Node *a = node->right; a && !interpreter->failed; a = a->next)
         values[index++] = evaluate(interpreter, a);
     CtValue result = integer(0);
     if (!interpreter->failed)
-        result = native ? builtin_call(interpreter, name, values, arguments)
+        result = native ? builtin_call(interpreter, name, builtin, values, arguments)
                         : invoke(interpreter, name, function, values, arguments);
-    free(values);
+    if (values != inline_values) free(values);
     return result;
 }
 
@@ -1218,6 +1246,12 @@ static CtValue evaluate(CtInterpreter *interpreter, Node *node) {
 }
 
 static Execution scoped(CtInterpreter *interpreter, Node *node) {
+    /* Blocks and loops establish their own scopes. Most controlled statements
+     * cannot declare anything, so wrapping every iteration in another empty
+     * scope only lengthens every name lookup in the hot loop body. Keep the
+     * wrapper for the declaration statements this permissive parser accepts. */
+    if (node->kind != N_DECLARATION && node->kind != N_GROUP && node->kind != N_ENUMERATOR)
+        return execute(interpreter, node);
     Scope scope = {.parent = interpreter->scope};
     interpreter->scope = &scope;
     Execution result = execute(interpreter, node);

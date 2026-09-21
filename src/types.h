@@ -3,6 +3,8 @@
 
 #include "cterpreter.h"
 
+#include <limits.h>
+
 /* The scalar kinds are listed in the same order as the CT_* handles so that a
  * basic type's handle is its kind. */
 typedef enum {
@@ -25,15 +27,31 @@ typedef struct {
     int is_signed, rank;
     char *tag;
     Member *members;
-    size_t member_count;
+    size_t member_count, member_capacity;
     CtType *parameters;
     size_t parameter_count;
     int complete, variadic;
 } TypeInfo;
 
-const TypeInfo *type_info(CtType type);
-TypeKind type_kind(CtType type);
-size_t ct_type_align(CtType type);
+/* Type metadata is immutable once a row is published. Keep the overwhelmingly
+ * common valid-handle path inline; the slow path seeds the table and handles a
+ * bad handle. The registry was already process-global, so exposing its read
+ * side here does not change its lifetime or concurrency semantics. */
+extern TypeInfo *ct_type_table;
+extern size_t ct_type_table_count;
+const TypeInfo *type_info_slow(CtType type);
+
+static inline const TypeInfo *type_info(CtType type) {
+    return type >= 0 && (size_t)type < ct_type_table_count
+        ? &ct_type_table[type] : type_info_slow(type);
+}
+
+static inline TypeKind type_kind(CtType type) { return type_info(type)->kind; }
+static inline size_t type_size(CtType type) { return type_info(type)->size; }
+static inline size_t ct_type_align(CtType type) { return type_info(type)->align; }
+#ifndef CT_TYPES_IMPLEMENTATION
+#define ct_type_size(type) type_size(type)
+#endif
 
 CtType type_pointer(CtType target);
 CtType type_array(CtType element, size_t count);
@@ -44,7 +62,7 @@ int type_finish(CtType aggregate);
 const Member *type_member(CtType aggregate, const char *name, size_t length);
 
 /* The element type of an array or the referenced type of a pointer. */
-CtType type_target(CtType type);
+static inline CtType type_target(CtType type) { return type_info(type)->target; }
 /* Arrays used in expressions yield a pointer to their first element. */
 CtType type_decay(CtType type);
 
@@ -64,13 +82,40 @@ static inline int type_is_number(CtType type) { return type_kind(type) <= TY_DOU
 static inline int type_is_signed(CtType type) { return type_info(type)->is_signed; }
 
 /* C17 6.3.1.1: anything narrower than int becomes int in an expression. */
-CtType type_promote(CtType type);
+static inline CtType type_promote(CtType type) {
+    const TypeInfo *info = type_info(type);
+    if (info->kind > TY_ULLONG || info->rank >= type_info(CT_INT)->rank) return type;
+    return CT_INT;
+}
 /* C17 6.3.1.8: the type the two operands of an arithmetic operator share. */
-CtType type_common(CtType left, CtType right);
+static inline CtType type_common(CtType left, CtType right) {
+    TypeKind left_kind = type_kind(left), right_kind = type_kind(right);
+    if (left_kind == TY_DOUBLE || right_kind == TY_DOUBLE) return CT_DOUBLE;
+    if (left_kind == TY_FLOAT || right_kind == TY_FLOAT) return CT_FLOAT;
+    left = type_promote(left);
+    right = type_promote(right);
+    if (left == right) return left;
+    const TypeInfo *a = type_info(left), *b = type_info(right);
+    if (a->is_signed == b->is_signed) return a->rank > b->rank ? left : right;
+    CtType unsigned_type = a->is_signed ? right : left;
+    CtType signed_type = a->is_signed ? left : right;
+    if (type_info(unsigned_type)->rank >= type_info(signed_type)->rank) return unsigned_type;
+    if (type_size(signed_type) > type_size(unsigned_type)) return signed_type;
+    return (CtType)(signed_type + 1);
+}
 /* The widest value the type can hold, for range checks and wrapping. */
-uint64_t type_mask(CtType type);
-int64_t type_minimum(CtType type);
-int64_t type_maximum(CtType type);
+static inline uint64_t type_mask(CtType type) {
+    size_t bits = type_size(type) * CHAR_BIT;
+    return bits >= 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
+}
+static inline int64_t type_maximum(CtType type) {
+    const TypeInfo *info = type_info(type);
+    uint64_t mask = type_mask(type);
+    return info->is_signed ? (int64_t)(mask >> 1) : (int64_t)mask;
+}
+static inline int64_t type_minimum(CtType type) {
+    return type_info(type)->is_signed ? -type_maximum(type) - 1 : 0;
+}
 /* Objects that a CtValue carries directly rather than by address. */
 static inline int type_is_scalar(CtType type) { return type_is_number(type) || type_is_pointer(type); }
 

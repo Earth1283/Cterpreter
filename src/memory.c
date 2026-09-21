@@ -15,6 +15,9 @@ static void forget_oldest_dead(Memory *memory) {
     while (split && remembered < REMEMBERED_DEAD)
         if (!memory->entries[--split]->alive) ++remembered;
     size_t kept = 0;
+    /* Some of the records below may be freed. Invalidating the tiny lookup
+     * cache is cheaper and less error-prone than finding each cached record. */
+    memset(memory->find_cache, 0, sizeof memory->find_cache);
     for (size_t i = 0; i < split; ++i) {
         Allocation *allocation = memory->entries[i];
         if (allocation->alive) memory->entries[kept++] = allocation;
@@ -45,11 +48,14 @@ uint64_t memory_allocate(Memory *memory, size_t size, int zero, int heap) {
     }
     Allocation *allocation = calloc(1, sizeof *allocation);
     if (allocation) {
-        allocation->data = calloc(size ? size : 1, 1);
-        allocation->initialized = malloc(size ? size : 1);
+        size_t storage = size ? size : 1;
+        /* Object bytes and their initialization bitmap share one allocation.
+         * They have identical lifetimes and are accessed together. */
+        allocation->data = calloc(storage * 2, 1);
+        allocation->initialized = allocation->data ? allocation->data + storage : NULL;
     }
     if (!allocation || !allocation->data || !allocation->initialized || !remember(memory, allocation)) {
-        if (allocation) { free(allocation->data); free(allocation->initialized); }
+        if (allocation) free(allocation->data);
         free(allocation);
         memory->error = "out of memory";
         return 0;
@@ -61,14 +67,16 @@ uint64_t memory_allocate(Memory *memory, size_t size, int zero, int heap) {
     allocation->size = size;
     allocation->alive = 1;
     allocation->heap = heap;
+    allocation->fully_initialized = zero || !size;
     memory->bytes += size;
+    memory->find_cache[(allocation->address >> 4) & (MEMORY_FIND_CACHE_SIZE - 1)] = allocation;
     return allocation->address;
 }
 
 /* Addresses are handed out in increasing order and separated by at least
  * sixteen bytes, so the table stays sorted and one object's one-past-the-end
  * address can never belong to the next object. */
-Allocation *memory_find(Memory *memory, uint64_t address) {
+Allocation *memory_find_slow(Memory *memory, uint64_t address, size_t cache_slot) {
     size_t low = 0, high = memory->count;
     while (low < high) {
         size_t middle = low + (high - low) / 2;
@@ -77,7 +85,9 @@ Allocation *memory_find(Memory *memory, uint64_t address) {
     }
     if (!low) return NULL;
     Allocation *allocation = memory->entries[low - 1];
-    return address - allocation->address <= allocation->size ? allocation : NULL;
+    if (address - allocation->address > allocation->size) return NULL;
+    memory->find_cache[cache_slot] = allocation;
+    return allocation;
 }
 
 void *memory_access(Memory *memory, uint64_t address, size_t size, int write) {
@@ -91,13 +101,16 @@ void *memory_access(Memory *memory, uint64_t address, size_t size, int write) {
     else if (write && allocation->readonly) memory->error = "write to a read-only object";
     if (memory->error) return NULL;
     size_t offset = (size_t)(address - allocation->address);
-    if (!write) {
+    if (!write && !allocation->fully_initialized) {
         for (size_t i = 0; i < size; ++i)
             if (!allocation->initialized[offset + i]) {
                 memory->error = "read of uninitialized memory";
                 return NULL;
             }
-    } else if (write == 1) memset(allocation->initialized + offset, 1, size);
+    } else if (write == 1) {
+        memset(allocation->initialized + offset, 1, size);
+        if (!offset && size == allocation->size) allocation->fully_initialized = 1;
+    }
     return allocation->data + offset;
 }
 
@@ -110,7 +123,6 @@ int memory_release(Memory *memory, uint64_t address, int heap_only) {
     else if (heap_only && !allocation->heap) memory->error = "free requires a heap allocation";
     if (memory->error) return 0;
     free(allocation->data);
-    free(allocation->initialized);
     allocation->data = NULL;
     allocation->initialized = NULL;
     allocation->alive = 0;
@@ -124,12 +136,16 @@ int memory_release(Memory *memory, uint64_t address, int heap_only) {
 
 CtValue memory_read(Memory *memory, uint64_t address, CtType type) {
     CtValue value = {.type = type};
-    size_t size = ct_type_size(type);
-    if (!type_is_scalar(type)) { memory->error = "cannot read a void or aggregate object directly"; return value; }
-    if (address % ct_type_align(type)) { memory->error = "misaligned memory access"; return value; }
+    const TypeInfo *info = type_info(type);
+    size_t size = info->size;
+    if (!(info->kind <= TY_DOUBLE || info->kind == TY_POINTER)) {
+        memory->error = "cannot read a void or aggregate object directly";
+        return value;
+    }
+    if (address % info->align) { memory->error = "misaligned memory access"; return value; }
     void *data = memory_access(memory, address, size, 0);
     if (!data) return value;
-    switch (type_kind(type)) {
+    switch (info->kind) {
         case TY_BOOL: READ_AS(_Bool, integer); break;
         case TY_CHAR: READ_AS(char, integer); break;
         case TY_SCHAR: READ_AS(signed char, integer); break;
@@ -150,12 +166,16 @@ CtValue memory_read(Memory *memory, uint64_t address, CtType type) {
 }
 
 int memory_write(Memory *memory, uint64_t address, CtValue value) {
-    size_t size = ct_type_size(value.type);
-    if (!type_is_scalar(value.type)) { memory->error = "cannot write a void or aggregate object directly"; return 0; }
-    if (address % ct_type_align(value.type)) { memory->error = "misaligned memory access"; return 0; }
+    const TypeInfo *info = type_info(value.type);
+    size_t size = info->size;
+    if (!(info->kind <= TY_DOUBLE || info->kind == TY_POINTER)) {
+        memory->error = "cannot write a void or aggregate object directly";
+        return 0;
+    }
+    if (address % info->align) { memory->error = "misaligned memory access"; return 0; }
     void *data = memory_access(memory, address, size, 1);
     if (!data) return 0;
-    switch (type_kind(value.type)) {
+    switch (info->kind) {
         case TY_BOOL: WRITE_AS(_Bool, integer); break;
         case TY_CHAR: WRITE_AS(char, integer); break;
         case TY_SCHAR: WRITE_AS(signed char, integer); break;
@@ -192,7 +212,6 @@ char *memory_string(Memory *memory, uint64_t address) {
 void memory_destroy(Memory *memory) {
     for (size_t i = 0; i < memory->count; ++i) {
         free(memory->entries[i]->data);
-        free(memory->entries[i]->initialized);
         free(memory->entries[i]);
     }
     free(memory->entries);

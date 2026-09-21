@@ -6,14 +6,20 @@
 typedef struct Macro Macro;
 struct Macro {
     char *name, *body;
+    size_t name_length;
+    uint64_t hash;
     char **parameters;
     size_t count;
     int function, variadic;
     Macro *next;
+    Macro *bucket_next;
 };
+
+#define PREPROCESSOR_BUCKETS 64
 
 typedef struct {
     Macro *macros;
+    Macro *buckets[PREPROCESSOR_BUCKETS];
     char **once;
     size_t once_count, counter;
     int initialized;
