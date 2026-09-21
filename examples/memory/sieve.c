@@ -3,8 +3,8 @@
 
 int main(int argc, char **argv) {
     int limit = argc > 1 ? atoi(argv[1]) : 100;
-    if (limit < 2 || limit > 5000) {
-        fprintf(stderr, "Limit must be between 2 and 5000.\n");
+    if (limit < 2 || limit > 50000) {
+        fprintf(stderr, "Limit must be between 2 and 50000.\n");
         return 2;
     }
     int *composite = calloc(limit + 1, sizeof(int));
