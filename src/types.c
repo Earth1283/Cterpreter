@@ -5,13 +5,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define TYPE_LIMIT 4096
+#define TYPE_LIMIT CT_TYPE_LIMIT
 
 TypeInfo *ct_type_table;
 size_t ct_type_table_count;
 static size_t table_capacity;
 static unsigned table_references;
-static CtType pointer_cache[TYPE_LIMIT]; /* stored as handle + 1; zero means absent */
+CtType ct_pointer_cache[CT_TYPE_LIMIT];
 
 #define SCALAR(k, type, sign, order) \
     {.kind = (k), .size = sizeof(type), .align = sizeof(type), .is_signed = (sign), .rank = (order), .complete = 1}
@@ -36,12 +36,20 @@ static const TypeInfo scalars[] = {
 
 _Static_assert(sizeof(long long) <= sizeof(int64_t), "Cterpreter requires long long to fit in 64 bits");
 
+static void set_limits(TypeInfo *info) {
+    size_t bits = info->size * CHAR_BIT;
+    info->mask = bits >= 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
+    info->maximum = info->is_signed ? (int64_t)(info->mask >> 1) : (int64_t)info->mask;
+    info->minimum = info->is_signed ? -info->maximum - 1 : 0;
+}
+
 static int seed(void) {
     if (ct_type_table_count) return 1;
     ct_type_table = calloc(sizeof scalars / sizeof scalars[0], sizeof *ct_type_table);
     if (!ct_type_table) return 0;
     table_capacity = sizeof scalars / sizeof scalars[0];
     memcpy(ct_type_table, scalars, sizeof scalars);
+    for (size_t i = 0; i < table_capacity; ++i) set_limits(&ct_type_table[i]);
     ct_type_table_count = table_capacity;
     return 1;
 }
@@ -55,6 +63,7 @@ static CtType append(TypeInfo info) {
         ct_type_table = grown;
         table_capacity = capacity;
     }
+    set_limits(&info);
     ct_type_table[ct_type_table_count] = info;
     return (CtType)ct_type_table_count++;
 }
@@ -74,17 +83,16 @@ CtType type_decay(CtType type) {
     return type;
 }
 
-CtType type_pointer(CtType target) {
+CtType type_pointer_slow(CtType target) {
     if (!seed()) return CT_VOID;
-    if (target >= 0 && target < TYPE_LIMIT && pointer_cache[target]) return pointer_cache[target] - 1;
     for (size_t i = 0; i < ct_type_table_count; ++i)
         if (ct_type_table[i].kind == TY_POINTER && ct_type_table[i].target == target) {
-            if (target >= 0 && target < TYPE_LIMIT) pointer_cache[target] = (CtType)i + 1;
+            if (target >= 0 && target < TYPE_LIMIT) ct_pointer_cache[target] = (CtType)i + 1;
             return (CtType)i;
         }
     CtType result = append((TypeInfo){.kind = TY_POINTER, .target = target, .size = sizeof(uint64_t),
                                       .align = sizeof(uint64_t), .complete = 1});
-    if (result != CT_VOID && target >= 0 && target < TYPE_LIMIT) pointer_cache[target] = result + 1;
+    if (result != CT_VOID && target >= 0 && target < TYPE_LIMIT) ct_pointer_cache[target] = result + 1;
     return result;
 }
 
@@ -312,5 +320,5 @@ void types_release(void) {
     free(ct_type_table);
     ct_type_table = NULL;
     ct_type_table_count = table_capacity = 0;
-    memset(pointer_cache, 0, sizeof pointer_cache);
+    memset(ct_pointer_cache, 0, sizeof ct_pointer_cache);
 }

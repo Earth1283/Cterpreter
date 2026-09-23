@@ -12,8 +12,13 @@ struct Symbol {
     uint64_t hash;
     CtValue value;
     uint64_t address;
-    int is_static, is_const, enum_constant;
+    int is_static, is_const, enum_constant, has_initializer;
     Node *function;
+    Allocation *object; /* the record behind address; alive for as long as the symbol */
+    uint64_t scope_serial;
+    Node *declaration;        /* local declarations only; global ones may outlive their unit */
+    Symbol *shadowed_binding; /* the declaration's binding to restore when this scope ends */
+    uint64_t shadowed_scope;
     Symbol *next;        /* declaration-order chain: full-scope iteration and teardown */
     Symbol *bucket_next; /* hash-bucket chain within the owning scope's index, see lookup() */
 };
@@ -26,6 +31,8 @@ struct Scope {
     Symbol *symbols;
     Symbol **buckets;
     size_t bucket_count, symbol_count;
+    uint64_t serial;
+    uint64_t name_filter[2]; /* two bits per declared name; a clear bit proves absence */
     Temporary *temporaries;
     Scope *parent;
 };
@@ -39,12 +46,10 @@ struct HostFile {
 };
 
 /* Interpreted functions are reachable through pointers by their object address. */
-typedef struct FunctionRef FunctionRef;
-struct FunctionRef {
+typedef struct {
     uint64_t address;
     Node *definition;
-    FunctionRef *next;
-};
+} FunctionRef;
 
 /* These frames live on the host stack; va_list stores only a managed identity. */
 typedef struct VaFrame VaFrame;
@@ -73,10 +78,12 @@ struct CtInterpreter {
     uint64_t error_number, token_state;
     unsigned random_state;
     HostFile *files;
-    FunctionRef *functions;
+    FunctionRef *functions; /* sorted by address, since addresses are handed out in increasing order */
+    size_t function_count, function_capacity;
     VaFrame *va_frame;
     Symbol *symbol_pool;       /* recycled Symbol nodes, avoids malloc/free per scope entry */
     Temporary *temporary_pool; /* recycled Temporary nodes, same reason */
+    uint64_t scope_serial;
 };
 
 CtValue runtime_error(CtInterpreter *interpreter, Token token, const char *message);

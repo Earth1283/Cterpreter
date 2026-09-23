@@ -25,6 +25,8 @@ typedef struct {
     CtType target;
     size_t count, size, align;
     int is_signed, rank;
+    uint64_t mask;
+    int64_t minimum, maximum;
     char *tag;
     Member *members;
     size_t member_count, member_capacity;
@@ -37,8 +39,11 @@ typedef struct {
  * common valid-handle path inline; the slow path seeds the table and handles a
  * bad handle. The registry was already process-global, so exposing its read
  * side here does not change its lifetime or concurrency semantics. */
+#define CT_TYPE_LIMIT 4096
+
 extern TypeInfo *ct_type_table;
 extern size_t ct_type_table_count;
+extern CtType ct_pointer_cache[CT_TYPE_LIMIT]; /* stored as handle + 1; zero means absent */
 const TypeInfo *type_info_slow(CtType type);
 
 static inline const TypeInfo *type_info(CtType type) {
@@ -46,14 +51,22 @@ static inline const TypeInfo *type_info(CtType type) {
         ? &ct_type_table[type] : type_info_slow(type);
 }
 
-static inline TypeKind type_kind(CtType type) { return type_info(type)->kind; }
+_Static_assert((int)CT_VOID == (int)TY_VOID && (int)CT_INT == (int)TY_INT, "basic handles must equal their kinds");
+
+static inline TypeKind type_kind(CtType type) {
+    return (unsigned)type <= TY_VOID ? (TypeKind)type : type_info(type)->kind;
+}
 static inline size_t type_size(CtType type) { return type_info(type)->size; }
 static inline size_t ct_type_align(CtType type) { return type_info(type)->align; }
 #ifndef CT_TYPES_IMPLEMENTATION
 #define ct_type_size(type) type_size(type)
 #endif
 
-CtType type_pointer(CtType target);
+CtType type_pointer_slow(CtType target);
+static inline CtType type_pointer(CtType target) {
+    return target >= 0 && target < CT_TYPE_LIMIT && ct_pointer_cache[target]
+        ? ct_pointer_cache[target] - 1 : type_pointer_slow(target);
+}
 CtType type_array(CtType element, size_t count);
 CtType type_function(CtType result, const CtType *parameters, size_t count, int variadic);
 CtType type_aggregate(int is_union, const char *tag, size_t tag_length);
@@ -104,18 +117,9 @@ static inline CtType type_common(CtType left, CtType right) {
     return (CtType)(signed_type + 1);
 }
 /* The widest value the type can hold, for range checks and wrapping. */
-static inline uint64_t type_mask(CtType type) {
-    size_t bits = type_size(type) * CHAR_BIT;
-    return bits >= 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
-}
-static inline int64_t type_maximum(CtType type) {
-    const TypeInfo *info = type_info(type);
-    uint64_t mask = type_mask(type);
-    return info->is_signed ? (int64_t)(mask >> 1) : (int64_t)mask;
-}
-static inline int64_t type_minimum(CtType type) {
-    return type_info(type)->is_signed ? -type_maximum(type) - 1 : 0;
-}
+static inline uint64_t type_mask(CtType type) { return type_info(type)->mask; }
+static inline int64_t type_maximum(CtType type) { return type_info(type)->maximum; }
+static inline int64_t type_minimum(CtType type) { return type_info(type)->minimum; }
 /* Objects that a CtValue carries directly rather than by address. */
 static inline int type_is_scalar(CtType type) { return type_is_number(type) || type_is_pointer(type); }
 

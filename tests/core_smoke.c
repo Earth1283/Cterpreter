@@ -74,6 +74,20 @@ int main(void) {
     check(a, "int order(const void *l, const void *r) { return *(const int *)l - *(const int *)r; }"
              "int list[4] = {4,2,3,1}; qsort(list, 4, sizeof(int), order); list[0] * 1000 + list[3]", CT_OK, 1004);
     check(a, "#include <errno.h>\nerrno = EDOM; errno == EDOM", CT_OK, 1);
+    check(a, "#include <inttypes.h>\n#include <signal.h>\nsig_atomic_t seen = SIGINT > 0; char hex[8];"
+             "snprintf(hex, sizeof hex, \"%\" PRIx64, UINT64_C(255)); seen + (strcmp(hex, \"ff\") == 0)", CT_OK, 2);
+    check(a, "_Static_assert(sizeof(int) == 4, \"int\"); struct Held { int a; _Static_assert(1, \"member\"); }; 3", CT_OK, 3);
+    check(a, "_Static_assert(1 + 1 == 3, \"arithmetic\");", CT_ERROR, 0);
+    check(a, "int spare = 1; _Static_assert(spare, \"not constant\");", CT_ERROR, 0);
+    check(a, "int walked = 0, i, j; for (i = 0, j = 4; i < j; i++, j--) walked += j - i; walked", CT_OK, 6);
+    check(a, "int left = 1, right; right = (left++, left * 10); right + left", CT_OK, 22);
+    check(a, "extern int shared; int read_shared(void) { return shared; } int shared = 41; read_shared() + 1", CT_OK, 42);
+    check(a, "int tentative; int tentative = 5; int tentative; tentative", CT_OK, 5);
+    check(a, "int twice_set = 1; int twice_set = 2;", CT_ERROR, 0);
+    check(a, "int reach(void) { extern int shared; return shared; } reach()", CT_OK, 41);
+    check(a, "static const char *words[] = {\"a\", \"b\", \"c\"}; int slots[sizeof words / sizeof words[0]];"
+             "(int)(sizeof slots / sizeof slots[0])", CT_OK, 3);
+    check(a, "struct Point here; enum { SPAN = sizeof here.x + sizeof \"ab\" }; SPAN", CT_OK, (int)sizeof(int) + 3);
     ct_clear(a);
     check(a, "x", CT_ERROR, 0);
     ct_destroy(a);

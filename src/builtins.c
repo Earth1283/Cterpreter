@@ -35,153 +35,154 @@ static CtType return_type(ReturnKind kind) {
 
 typedef struct { const char *name; ReturnKind type; unsigned char arity; const char *parameters; } Signature;
 
-/* Stable positions in signatures[]. Ranges let the call dispatcher jump
- * straight to a function family after its one binary-search lookup. */
 enum {
-    BI_PRINTF = 0, BI_FPRINTF = 3,
-    BI_SCANF = 4, BI_FSCANF = 6,
-    BI_VPRINTF = 7, BI_VFSCANF = 13,
-    BI_FOPEN = 18, BI_STRERROR = 39,
-    BI_MALLOC = 40, BI_FREE = 43,
-    BI_STRLEN = 44, BI_STRPBRK = 56, BI_STRTOK = 57,
-    BI_MEMCPY = 58, BI_MEMCHR = 62,
-    BI_ATOI = 63, BI_ATOF = 65, BI_STRTOL = 66, BI_STRTOD = 67,
-    BI_QSORT = 72, BI_BSEARCH = 73,
-    BI_SQRT = 76, BI_COPYSIGN = 108,
-    BI_ISDIGIT = 112, BI_TOLOWER = 125,
-    BI_COUNT = 129
+    BI_PRINTF, BI_SPRINTF, BI_SNPRINTF, BI_FPRINTF, BI_SCANF, BI_SSCANF, BI_FSCANF, BI_VPRINTF, BI_VSPRINTF,
+    BI_VSNPRINTF, BI_VFPRINTF, BI_VSCANF, BI_VSSCANF, BI_VFSCANF, BI_PUTS, BI_PUTCHAR, BI_GETCHAR,
+    BI_PERROR, BI_FOPEN, BI_FCLOSE, BI_FFLUSH, BI_FGETC, BI_FPUTC, BI_FPUTS, BI_FGETS, BI_GETC, BI_PUTC,
+    BI_UNGETC, BI_FREAD, BI_FWRITE, BI_FSEEK, BI_FTELL, BI_REWIND, BI_FEOF, BI_FERROR, BI_CLEARERR,
+    BI_REMOVE, BI_RENAME, BI_GETENV, BI_STRERROR, BI_MALLOC, BI_CALLOC, BI_REALLOC, BI_FREE, BI_STRLEN,
+    BI_STRCMP, BI_STRNCMP, BI_STRCPY, BI_STRNCPY, BI_STRCAT, BI_STRNCAT, BI_STRCHR, BI_STRRCHR, BI_STRSTR,
+    BI_STRSPN, BI_STRCSPN, BI_STRPBRK, BI_STRTOK, BI_MEMCPY, BI_MEMMOVE, BI_MEMSET, BI_MEMCMP, BI_MEMCHR,
+    BI_ATOI, BI_ATOL, BI_ATOF, BI_STRTOL, BI_STRTOD, BI_ABS, BI_LABS, BI_RAND, BI_SRAND, BI_QSORT,
+    BI_BSEARCH, BI_ABORT, BI_EXIT, BI_SQRT, BI_CBRT, BI_POW, BI_HYPOT, BI_SIN, BI_COS, BI_TAN, BI_ASIN,
+    BI_ACOS, BI_ATAN, BI_ATAN2, BI_SINH, BI_COSH, BI_TANH, BI_ASINH, BI_ACOSH, BI_ATANH, BI_EXP,
+    BI_EXP2, BI_LOG, BI_LOG2, BI_LOG10, BI_LDEXP, BI_FLOOR, BI_CEIL, BI_ROUND, BI_TRUNC, BI_FABS,
+    BI_FMOD, BI_FMIN, BI_FMAX, BI_FDIM, BI_COPYSIGN, BI_TIME, BI_DIFFTIME, BI_CLOCK, BI_ISDIGIT,
+    BI_ISALPHA, BI_ISALNUM, BI_ISSPACE, BI_ISUPPER, BI_ISLOWER, BI_ISPUNCT, BI_ISPRINT, BI_ISGRAPH,
+    BI_ISCNTRL, BI_ISXDIGIT, BI_ISBLANK, BI_TOUPPER, BI_TOLOWER, BI_ASSERT_FAIL, BI_INTERPRET, BI_INTERPRET_DEPTH,
+    BI_COUNT
 };
 
 static const Signature signatures[] = {
-    {"printf", RT_INT, VARIADIC, "const char *format, ..."},
-    {"sprintf", RT_INT, VARIADIC, "char *buffer, const char *format, ..."},
-    {"snprintf", RT_INT, VARIADIC, "char *buffer, size_t size, const char *format, ..."},
-    {"fprintf", RT_INT, VARIADIC, "FILE *stream, const char *format, ..."},
-    {"scanf", RT_INT, VARIADIC, "const char *format, ..."},
-    {"sscanf", RT_INT, VARIADIC, "const char *text, const char *format, ..."},
-    {"fscanf", RT_INT, VARIADIC, "FILE *stream, const char *format, ..."},
-    {"vprintf", RT_INT, 2, "const char *format, va_list args"},
-    {"vsprintf", RT_INT, 3, "char *buffer, const char *format, va_list args"},
-    {"vsnprintf", RT_INT, 4, "char *buffer, size_t size, const char *format, va_list args"},
-    {"vfprintf", RT_INT, 3, "FILE *stream, const char *format, va_list args"},
-    {"vscanf", RT_INT, 2, "const char *format, va_list args"},
-    {"vsscanf", RT_INT, 3, "const char *text, const char *format, va_list args"},
-    {"vfscanf", RT_INT, 3, "FILE *stream, const char *format, va_list args"},
-    {"puts", RT_INT, 1, "const char *text"},
-    {"putchar", RT_INT, 1, "int character"},
-    {"getchar", RT_INT, 0, "void"},
-    {"perror", RT_VOID, 1, "const char *prefix"},
-    {"fopen", RT_VOID_POINTER, 2, "const char *path, const char *mode"},
-    {"fclose", RT_INT, 1, "FILE *stream"},
-    {"fflush", RT_INT, 1, "FILE *stream"},
-    {"fgetc", RT_INT, 1, "FILE *stream"},
-    {"fputc", RT_INT, 2, "int character, FILE *stream"},
-    {"fputs", RT_INT, 2, "const char *text, FILE *stream"},
-    {"fgets", RT_CHAR_POINTER, 3, "char *buffer, int size, FILE *stream"},
-    {"getc", RT_INT, 1, "FILE *stream"},
-    {"putc", RT_INT, 2, "int character, FILE *stream"},
-    {"ungetc", RT_INT, 2, "int character, FILE *stream"},
-    {"fread", RT_ULONG, 4, "void *buffer, size_t size, size_t count, FILE *stream"},
-    {"fwrite", RT_ULONG, 4, "const void *buffer, size_t size, size_t count, FILE *stream"},
-    {"fseek", RT_INT, 3, "FILE *stream, long offset, int origin"},
-    {"ftell", RT_LONG, 1, "FILE *stream"},
-    {"rewind", RT_VOID, 1, "FILE *stream"},
-    {"feof", RT_INT, 1, "FILE *stream"},
-    {"ferror", RT_INT, 1, "FILE *stream"},
-    {"clearerr", RT_VOID, 1, "FILE *stream"},
-    {"remove", RT_INT, 1, "const char *path"},
-    {"rename", RT_INT, 2, "const char *from, const char *to"},
-    {"getenv", RT_CHAR_POINTER, 1, "const char *name"},
-    {"strerror", RT_CHAR_POINTER, 1, "int code"},
-    {"malloc", RT_VOID_POINTER, 1, "size_t size"},
-    {"calloc", RT_VOID_POINTER, 2, "size_t count, size_t size"},
-    {"realloc", RT_VOID_POINTER, 2, "void *block, size_t size"},
-    {"free", RT_VOID, 1, "void *block"},
-    {"strlen", RT_ULONG, 1, "const char *text"},
-    {"strcmp", RT_INT, 2, "const char *left, const char *right"},
-    {"strncmp", RT_INT, 3, "const char *left, const char *right, size_t count"},
-    {"strcpy", RT_CHAR_POINTER, 2, "char *target, const char *source"},
-    {"strncpy", RT_CHAR_POINTER, 3, "char *target, const char *source, size_t count"},
-    {"strcat", RT_CHAR_POINTER, 2, "char *target, const char *source"},
-    {"strncat", RT_CHAR_POINTER, 3, "char *target, const char *source, size_t count"},
-    {"strchr", RT_CHAR_POINTER, 2, "const char *text, int character"},
-    {"strrchr", RT_CHAR_POINTER, 2, "const char *text, int character"},
-    {"strstr", RT_CHAR_POINTER, 2, "const char *haystack, const char *needle"},
-    {"strspn", RT_ULONG, 2, "const char *text, const char *accepted"},
-    {"strcspn", RT_ULONG, 2, "const char *text, const char *rejected"},
-    {"strpbrk", RT_CHAR_POINTER, 2, "const char *text, const char *accepted"},
-    {"strtok", RT_CHAR_POINTER, 2, "char *text, const char *separators"},
-    {"memcpy", RT_VOID_POINTER, 3, "void *target, const void *source, size_t count"},
-    {"memmove", RT_VOID_POINTER, 3, "void *target, const void *source, size_t count"},
-    {"memset", RT_VOID_POINTER, 3, "void *target, int byte, size_t count"},
-    {"memcmp", RT_INT, 3, "const void *left, const void *right, size_t count"},
-    {"memchr", RT_VOID_POINTER, 3, "const void *block, int byte, size_t count"},
-    {"atoi", RT_INT, 1, "const char *text"},
-    {"atol", RT_LONG, 1, "const char *text"},
-    {"atof", RT_DOUBLE, 1, "const char *text"},
-    {"strtol", RT_LONG, 3, "const char *text, char **end, int base"},
-    {"strtod", RT_DOUBLE, 2, "const char *text, char **end"},
-    {"abs", RT_INT, 1, "int value"},
-    {"labs", RT_LONG, 1, "long value"},
-    {"rand", RT_INT, 0, "void"},
-    {"srand", RT_VOID, 1, "unsigned seed"},
-    {"qsort", RT_VOID, 4, "void *base, size_t count, size_t size, int (*compare)(const void *, const void *)"},
-    {"bsearch", RT_VOID_POINTER, 5, "const void *key, const void *base, size_t count, size_t size, int (*compare)(const void *, const void *)"},
-    {"abort", RT_VOID, 0, "void"},
-    {"exit", RT_VOID, 1, "int status"},
-    {"sqrt", RT_DOUBLE, 1, "double value"},
-    {"cbrt", RT_DOUBLE, 1, "double value"},
-    {"pow", RT_DOUBLE, 2, "double base, double exponent"},
-    {"hypot", RT_DOUBLE, 2, "double x, double y"},
-    {"sin", RT_DOUBLE, 1, "double radians"},
-    {"cos", RT_DOUBLE, 1, "double radians"},
-    {"tan", RT_DOUBLE, 1, "double radians"},
-    {"asin", RT_DOUBLE, 1, "double value"},
-    {"acos", RT_DOUBLE, 1, "double value"},
-    {"atan", RT_DOUBLE, 1, "double value"},
-    {"atan2", RT_DOUBLE, 2, "double y, double x"},
-    {"sinh", RT_DOUBLE, 1, "double value"},
-    {"cosh", RT_DOUBLE, 1, "double value"},
-    {"tanh", RT_DOUBLE, 1, "double value"},
-    {"asinh", RT_DOUBLE, 1, "double value"},
-    {"acosh", RT_DOUBLE, 1, "double value"},
-    {"atanh", RT_DOUBLE, 1, "double value"},
-    {"exp", RT_DOUBLE, 1, "double value"},
-    {"exp2", RT_DOUBLE, 1, "double value"},
-    {"log", RT_DOUBLE, 1, "double value"},
-    {"log2", RT_DOUBLE, 1, "double value"},
-    {"log10", RT_DOUBLE, 1, "double value"},
-    {"ldexp", RT_DOUBLE, 2, "double value, int exponent"},
-    {"floor", RT_DOUBLE, 1, "double value"},
-    {"ceil", RT_DOUBLE, 1, "double value"},
-    {"round", RT_DOUBLE, 1, "double value"},
-    {"trunc", RT_DOUBLE, 1, "double value"},
-    {"fabs", RT_DOUBLE, 1, "double value"},
-    {"fmod", RT_DOUBLE, 2, "double numerator, double denominator"},
-    {"fmin", RT_DOUBLE, 2, "double left, double right"},
-    {"fmax", RT_DOUBLE, 2, "double left, double right"},
-    {"fdim", RT_DOUBLE, 2, "double left, double right"},
-    {"copysign", RT_DOUBLE, 2, "double magnitude, double sign"},
-    {"time", RT_LONG, 1, "time_t *destination"},
-    {"difftime", RT_DOUBLE, 2, "time_t later, time_t earlier"},
-    {"clock", RT_LONG, 0, "void"},
-    {"isdigit", RT_INT, 1, "int character"},
-    {"isalpha", RT_INT, 1, "int character"},
-    {"isalnum", RT_INT, 1, "int character"},
-    {"isspace", RT_INT, 1, "int character"},
-    {"isupper", RT_INT, 1, "int character"},
-    {"islower", RT_INT, 1, "int character"},
-    {"ispunct", RT_INT, 1, "int character"},
-    {"isprint", RT_INT, 1, "int character"},
-    {"isgraph", RT_INT, 1, "int character"},
-    {"iscntrl", RT_INT, 1, "int character"},
-    {"isxdigit", RT_INT, 1, "int character"},
-    {"isblank", RT_INT, 1, "int character"},
-    {"toupper", RT_INT, 1, "int character"},
-    {"tolower", RT_INT, 1, "int character"},
-    {"__assert_fail", RT_INT, 3, "const char *expression, const char *file, int line"},
-    {"interpret", RT_INT, 1, "const char *path"},
-    {"interpret_depth", RT_INT, 0, "void"}
+    [BI_PRINTF] = {"printf", RT_INT, VARIADIC, "const char *format, ..."},
+    [BI_SPRINTF] = {"sprintf", RT_INT, VARIADIC, "char *buffer, const char *format, ..."},
+    [BI_SNPRINTF] = {"snprintf", RT_INT, VARIADIC, "char *buffer, size_t size, const char *format, ..."},
+    [BI_FPRINTF] = {"fprintf", RT_INT, VARIADIC, "FILE *stream, const char *format, ..."},
+    [BI_SCANF] = {"scanf", RT_INT, VARIADIC, "const char *format, ..."},
+    [BI_SSCANF] = {"sscanf", RT_INT, VARIADIC, "const char *text, const char *format, ..."},
+    [BI_FSCANF] = {"fscanf", RT_INT, VARIADIC, "FILE *stream, const char *format, ..."},
+    [BI_VPRINTF] = {"vprintf", RT_INT, 2, "const char *format, va_list args"},
+    [BI_VSPRINTF] = {"vsprintf", RT_INT, 3, "char *buffer, const char *format, va_list args"},
+    [BI_VSNPRINTF] = {"vsnprintf", RT_INT, 4, "char *buffer, size_t size, const char *format, va_list args"},
+    [BI_VFPRINTF] = {"vfprintf", RT_INT, 3, "FILE *stream, const char *format, va_list args"},
+    [BI_VSCANF] = {"vscanf", RT_INT, 2, "const char *format, va_list args"},
+    [BI_VSSCANF] = {"vsscanf", RT_INT, 3, "const char *text, const char *format, va_list args"},
+    [BI_VFSCANF] = {"vfscanf", RT_INT, 3, "FILE *stream, const char *format, va_list args"},
+    [BI_PUTS] = {"puts", RT_INT, 1, "const char *text"},
+    [BI_PUTCHAR] = {"putchar", RT_INT, 1, "int character"},
+    [BI_GETCHAR] = {"getchar", RT_INT, 0, "void"},
+    [BI_PERROR] = {"perror", RT_VOID, 1, "const char *prefix"},
+    [BI_FOPEN] = {"fopen", RT_VOID_POINTER, 2, "const char *path, const char *mode"},
+    [BI_FCLOSE] = {"fclose", RT_INT, 1, "FILE *stream"},
+    [BI_FFLUSH] = {"fflush", RT_INT, 1, "FILE *stream"},
+    [BI_FGETC] = {"fgetc", RT_INT, 1, "FILE *stream"},
+    [BI_FPUTC] = {"fputc", RT_INT, 2, "int character, FILE *stream"},
+    [BI_FPUTS] = {"fputs", RT_INT, 2, "const char *text, FILE *stream"},
+    [BI_FGETS] = {"fgets", RT_CHAR_POINTER, 3, "char *buffer, int size, FILE *stream"},
+    [BI_GETC] = {"getc", RT_INT, 1, "FILE *stream"},
+    [BI_PUTC] = {"putc", RT_INT, 2, "int character, FILE *stream"},
+    [BI_UNGETC] = {"ungetc", RT_INT, 2, "int character, FILE *stream"},
+    [BI_FREAD] = {"fread", RT_ULONG, 4, "void *buffer, size_t size, size_t count, FILE *stream"},
+    [BI_FWRITE] = {"fwrite", RT_ULONG, 4, "const void *buffer, size_t size, size_t count, FILE *stream"},
+    [BI_FSEEK] = {"fseek", RT_INT, 3, "FILE *stream, long offset, int origin"},
+    [BI_FTELL] = {"ftell", RT_LONG, 1, "FILE *stream"},
+    [BI_REWIND] = {"rewind", RT_VOID, 1, "FILE *stream"},
+    [BI_FEOF] = {"feof", RT_INT, 1, "FILE *stream"},
+    [BI_FERROR] = {"ferror", RT_INT, 1, "FILE *stream"},
+    [BI_CLEARERR] = {"clearerr", RT_VOID, 1, "FILE *stream"},
+    [BI_REMOVE] = {"remove", RT_INT, 1, "const char *path"},
+    [BI_RENAME] = {"rename", RT_INT, 2, "const char *from, const char *to"},
+    [BI_GETENV] = {"getenv", RT_CHAR_POINTER, 1, "const char *name"},
+    [BI_STRERROR] = {"strerror", RT_CHAR_POINTER, 1, "int code"},
+    [BI_MALLOC] = {"malloc", RT_VOID_POINTER, 1, "size_t size"},
+    [BI_CALLOC] = {"calloc", RT_VOID_POINTER, 2, "size_t count, size_t size"},
+    [BI_REALLOC] = {"realloc", RT_VOID_POINTER, 2, "void *block, size_t size"},
+    [BI_FREE] = {"free", RT_VOID, 1, "void *block"},
+    [BI_STRLEN] = {"strlen", RT_ULONG, 1, "const char *text"},
+    [BI_STRCMP] = {"strcmp", RT_INT, 2, "const char *left, const char *right"},
+    [BI_STRNCMP] = {"strncmp", RT_INT, 3, "const char *left, const char *right, size_t count"},
+    [BI_STRCPY] = {"strcpy", RT_CHAR_POINTER, 2, "char *target, const char *source"},
+    [BI_STRNCPY] = {"strncpy", RT_CHAR_POINTER, 3, "char *target, const char *source, size_t count"},
+    [BI_STRCAT] = {"strcat", RT_CHAR_POINTER, 2, "char *target, const char *source"},
+    [BI_STRNCAT] = {"strncat", RT_CHAR_POINTER, 3, "char *target, const char *source, size_t count"},
+    [BI_STRCHR] = {"strchr", RT_CHAR_POINTER, 2, "const char *text, int character"},
+    [BI_STRRCHR] = {"strrchr", RT_CHAR_POINTER, 2, "const char *text, int character"},
+    [BI_STRSTR] = {"strstr", RT_CHAR_POINTER, 2, "const char *haystack, const char *needle"},
+    [BI_STRSPN] = {"strspn", RT_ULONG, 2, "const char *text, const char *accepted"},
+    [BI_STRCSPN] = {"strcspn", RT_ULONG, 2, "const char *text, const char *rejected"},
+    [BI_STRPBRK] = {"strpbrk", RT_CHAR_POINTER, 2, "const char *text, const char *accepted"},
+    [BI_STRTOK] = {"strtok", RT_CHAR_POINTER, 2, "char *text, const char *separators"},
+    [BI_MEMCPY] = {"memcpy", RT_VOID_POINTER, 3, "void *target, const void *source, size_t count"},
+    [BI_MEMMOVE] = {"memmove", RT_VOID_POINTER, 3, "void *target, const void *source, size_t count"},
+    [BI_MEMSET] = {"memset", RT_VOID_POINTER, 3, "void *target, int byte, size_t count"},
+    [BI_MEMCMP] = {"memcmp", RT_INT, 3, "const void *left, const void *right, size_t count"},
+    [BI_MEMCHR] = {"memchr", RT_VOID_POINTER, 3, "const void *block, int byte, size_t count"},
+    [BI_ATOI] = {"atoi", RT_INT, 1, "const char *text"},
+    [BI_ATOL] = {"atol", RT_LONG, 1, "const char *text"},
+    [BI_ATOF] = {"atof", RT_DOUBLE, 1, "const char *text"},
+    [BI_STRTOL] = {"strtol", RT_LONG, 3, "const char *text, char **end, int base"},
+    [BI_STRTOD] = {"strtod", RT_DOUBLE, 2, "const char *text, char **end"},
+    [BI_ABS] = {"abs", RT_INT, 1, "int value"},
+    [BI_LABS] = {"labs", RT_LONG, 1, "long value"},
+    [BI_RAND] = {"rand", RT_INT, 0, "void"},
+    [BI_SRAND] = {"srand", RT_VOID, 1, "unsigned seed"},
+    [BI_QSORT] = {"qsort", RT_VOID, 4, "void *base, size_t count, size_t size, int (*compare)(const void *, const void *)"},
+    [BI_BSEARCH] = {"bsearch", RT_VOID_POINTER, 5, "const void *key, const void *base, size_t count, size_t size, int (*compare)(const void *, const void *)"},
+    [BI_ABORT] = {"abort", RT_VOID, 0, "void"},
+    [BI_EXIT] = {"exit", RT_VOID, 1, "int status"},
+    [BI_SQRT] = {"sqrt", RT_DOUBLE, 1, "double value"},
+    [BI_CBRT] = {"cbrt", RT_DOUBLE, 1, "double value"},
+    [BI_POW] = {"pow", RT_DOUBLE, 2, "double base, double exponent"},
+    [BI_HYPOT] = {"hypot", RT_DOUBLE, 2, "double x, double y"},
+    [BI_SIN] = {"sin", RT_DOUBLE, 1, "double radians"},
+    [BI_COS] = {"cos", RT_DOUBLE, 1, "double radians"},
+    [BI_TAN] = {"tan", RT_DOUBLE, 1, "double radians"},
+    [BI_ASIN] = {"asin", RT_DOUBLE, 1, "double value"},
+    [BI_ACOS] = {"acos", RT_DOUBLE, 1, "double value"},
+    [BI_ATAN] = {"atan", RT_DOUBLE, 1, "double value"},
+    [BI_ATAN2] = {"atan2", RT_DOUBLE, 2, "double y, double x"},
+    [BI_SINH] = {"sinh", RT_DOUBLE, 1, "double value"},
+    [BI_COSH] = {"cosh", RT_DOUBLE, 1, "double value"},
+    [BI_TANH] = {"tanh", RT_DOUBLE, 1, "double value"},
+    [BI_ASINH] = {"asinh", RT_DOUBLE, 1, "double value"},
+    [BI_ACOSH] = {"acosh", RT_DOUBLE, 1, "double value"},
+    [BI_ATANH] = {"atanh", RT_DOUBLE, 1, "double value"},
+    [BI_EXP] = {"exp", RT_DOUBLE, 1, "double value"},
+    [BI_EXP2] = {"exp2", RT_DOUBLE, 1, "double value"},
+    [BI_LOG] = {"log", RT_DOUBLE, 1, "double value"},
+    [BI_LOG2] = {"log2", RT_DOUBLE, 1, "double value"},
+    [BI_LOG10] = {"log10", RT_DOUBLE, 1, "double value"},
+    [BI_LDEXP] = {"ldexp", RT_DOUBLE, 2, "double value, int exponent"},
+    [BI_FLOOR] = {"floor", RT_DOUBLE, 1, "double value"},
+    [BI_CEIL] = {"ceil", RT_DOUBLE, 1, "double value"},
+    [BI_ROUND] = {"round", RT_DOUBLE, 1, "double value"},
+    [BI_TRUNC] = {"trunc", RT_DOUBLE, 1, "double value"},
+    [BI_FABS] = {"fabs", RT_DOUBLE, 1, "double value"},
+    [BI_FMOD] = {"fmod", RT_DOUBLE, 2, "double numerator, double denominator"},
+    [BI_FMIN] = {"fmin", RT_DOUBLE, 2, "double left, double right"},
+    [BI_FMAX] = {"fmax", RT_DOUBLE, 2, "double left, double right"},
+    [BI_FDIM] = {"fdim", RT_DOUBLE, 2, "double left, double right"},
+    [BI_COPYSIGN] = {"copysign", RT_DOUBLE, 2, "double magnitude, double sign"},
+    [BI_TIME] = {"time", RT_LONG, 1, "time_t *destination"},
+    [BI_DIFFTIME] = {"difftime", RT_DOUBLE, 2, "time_t later, time_t earlier"},
+    [BI_CLOCK] = {"clock", RT_LONG, 0, "void"},
+    [BI_ISDIGIT] = {"isdigit", RT_INT, 1, "int character"},
+    [BI_ISALPHA] = {"isalpha", RT_INT, 1, "int character"},
+    [BI_ISALNUM] = {"isalnum", RT_INT, 1, "int character"},
+    [BI_ISSPACE] = {"isspace", RT_INT, 1, "int character"},
+    [BI_ISUPPER] = {"isupper", RT_INT, 1, "int character"},
+    [BI_ISLOWER] = {"islower", RT_INT, 1, "int character"},
+    [BI_ISPUNCT] = {"ispunct", RT_INT, 1, "int character"},
+    [BI_ISPRINT] = {"isprint", RT_INT, 1, "int character"},
+    [BI_ISGRAPH] = {"isgraph", RT_INT, 1, "int character"},
+    [BI_ISCNTRL] = {"iscntrl", RT_INT, 1, "int character"},
+    [BI_ISXDIGIT] = {"isxdigit", RT_INT, 1, "int character"},
+    [BI_ISBLANK] = {"isblank", RT_INT, 1, "int character"},
+    [BI_TOUPPER] = {"toupper", RT_INT, 1, "int character"},
+    [BI_TOLOWER] = {"tolower", RT_INT, 1, "int character"},
+    [BI_ASSERT_FAIL] = {"__assert_fail", RT_INT, 3, "const char *expression, const char *file, int line"},
+    [BI_INTERPRET] = {"interpret", RT_INT, 1, "const char *path"},
+    [BI_INTERPRET_DEPTH] = {"interpret_depth", RT_INT, 0, "void"}
 };
 
 _Static_assert(BI_COUNT == sizeof signatures / sizeof signatures[0], "builtin ids must match signatures");
@@ -250,13 +251,6 @@ int builtin_resolve(Token name, size_t *id) {
     if (!row) return 0;
     *id = (size_t)(row - signatures);
     return 1;
-}
-
-static int require_count(CtInterpreter *interpreter, Token name, size_t count) {
-    const Signature *row = find_signature(name);
-    if (row && (row->arity == VARIADIC || row->arity == count)) return 1;
-    (void)runtime_error(interpreter, name, "incorrect number of library arguments");
-    return 0;
 }
 
 static int64_t number(CtInterpreter *interpreter, Token name, CtValue value) {
@@ -449,9 +443,29 @@ static int append(Output *output, const char *data, size_t length) {
     return 1;
 }
 
-static CtValue formatted(CtInterpreter *interpreter, Token name, const CtValue *args, size_t count) {
-    int bounded = named(name, "snprintf"), to_string = bounded || named(name, "sprintf");
-    int to_file = named(name, "fprintf");
+typedef struct {
+    char conversion;
+    int integer_conversion;
+    const char *text;
+    int64_t signed_value;
+    uint64_t unsigned_value;
+    double real_value;
+} Conversion;
+
+static int format_conversion(char *buffer, size_t capacity, const char *spec, const Conversion *value) {
+    switch (value->conversion) {
+        case 's': return snprintf(buffer, capacity, spec, value->text);
+        case 'c': return snprintf(buffer, capacity, spec, (int)value->signed_value);
+        case 'd': case 'i': return snprintf(buffer, capacity, spec, (intmax_t)value->signed_value);
+        default:
+            if (value->integer_conversion) return snprintf(buffer, capacity, spec, (uintmax_t)value->unsigned_value);
+            return snprintf(buffer, capacity, spec, value->real_value);
+    }
+}
+
+static CtValue formatted(CtInterpreter *interpreter, Token name, size_t id, const CtValue *args, size_t count) {
+    int bounded = id == BI_SNPRINTF, to_string = bounded || id == BI_SPRINTF;
+    int to_file = id == BI_FPRINTF;
     size_t first = bounded ? 2 : to_string || to_file ? 1 : 0;
     FILE *stream = interpreter->output;
     if (to_file) {
@@ -467,7 +481,9 @@ static CtValue formatted(CtInterpreter *interpreter, Token name, const CtValue *
     size_t argument = first + 1;
     for (size_t i = 0; format[i] && !interpreter->failed; ++i) {
         if (format[i] != '%') {
-            if (!append(&output, format + i, 1)) (void)runtime_error(interpreter, name, "formatted output limit exceeded");
+            size_t run = strcspn(format + i, "%");
+            if (!append(&output, format + i, run)) (void)runtime_error(interpreter, name, "formatted output limit exceeded");
+            i += run - 1;
             continue;
         }
         ++i;
@@ -551,22 +567,13 @@ static CtValue formatted(CtInterpreter *interpreter, Token name, const CtValue *
         }
         spec[used++] = conversion;
         spec[used] = '\0';
-        int required;
-        if (conversion == 's') required = snprintf(NULL, 0, spec, text);
-        else if (conversion == 'c') required = snprintf(NULL, 0, spec, (int)signed_value);
-        else if (conversion == 'd' || conversion == 'i') required = snprintf(NULL, 0, spec, (intmax_t)signed_value);
-        else if (integer_conversion) required = snprintf(NULL, 0, spec, (uintmax_t)unsigned_value);
-        else required = snprintf(NULL, 0, spec, real_value);
-        if (required < 0 || required > (int)CT_SOURCE_LIMIT) { (void)runtime_error(interpreter, name, "formatted output limit exceeded"); break; }
+        Conversion argument_value = {conversion, integer_conversion, text, signed_value, unsigned_value, real_value};
         char inline_piece[128];
-        char *piece = (size_t)required < sizeof inline_piece
-            ? inline_piece : malloc((size_t)required + 1);
+        int required = format_conversion(inline_piece, sizeof inline_piece, spec, &argument_value);
+        if (required < 0 || required > (int)CT_SOURCE_LIMIT) { (void)runtime_error(interpreter, name, "formatted output limit exceeded"); break; }
+        char *piece = (size_t)required < sizeof inline_piece ? inline_piece : malloc((size_t)required + 1);
         if (!piece) { (void)runtime_error(interpreter, name, "out of memory"); break; }
-        if (conversion == 's') (void)snprintf(piece, (size_t)required + 1, spec, text);
-        else if (conversion == 'c') (void)snprintf(piece, (size_t)required + 1, spec, (int)signed_value);
-        else if (conversion == 'd' || conversion == 'i') (void)snprintf(piece, (size_t)required + 1, spec, (intmax_t)signed_value);
-        else if (integer_conversion) (void)snprintf(piece, (size_t)required + 1, spec, (uintmax_t)unsigned_value);
-        else (void)snprintf(piece, (size_t)required + 1, spec, real_value);
+        if (piece != inline_piece) (void)format_conversion(piece, (size_t)required + 1, spec, &argument_value);
         if (!append(&output, piece, (size_t)required)) (void)runtime_error(interpreter, name, "formatted output limit exceeded");
         if (piece != inline_piece) free(piece);
     }
@@ -611,8 +618,8 @@ static int input_nonspace(Input *input) {
     return character;
 }
 
-static CtValue scanned(CtInterpreter *interpreter, Token name, const CtValue *args, size_t count) {
-    int from_string = named(name, "sscanf"), from_file = named(name, "fscanf");
+static CtValue scanned(CtInterpreter *interpreter, Token name, size_t id, const CtValue *args, size_t count) {
+    int from_string = id == BI_SSCANF, from_file = id == BI_FSCANF;
     size_t format_index = from_string || from_file ? 1 : 0;
     if (count <= format_index) return runtime_error(interpreter, name, "missing input format");
     Input input = {.file = interpreter->input};
@@ -756,10 +763,9 @@ static CtValue scanned(CtInterpreter *interpreter, Token name, const CtValue *ar
     return integer(!assignments && eof ? EOF : assignments);
 }
 
-static CtValue file_call(CtInterpreter *interpreter, Token name, const CtValue *args, size_t count) {
-    if (!require_count(interpreter, name, count)) return integer(0);
+static CtValue file_call(CtInterpreter *interpreter, Token name, size_t id, const CtValue *args) {
     errno = 0;
-    if (named(name, "fopen")) {
+    if (id == BI_FOPEN) {
         char *path = string(interpreter, name, args[0]);
         char *mode = string(interpreter, name, args[1]);
         if (interpreter->failed) return integer(0);
@@ -770,45 +776,45 @@ static CtValue file_call(CtInterpreter *interpreter, Token name, const CtValue *
         if (interpreter->failed) fclose(stream);
         return value;
     }
-    if (named(name, "remove") || named(name, "rename") || named(name, "getenv") || named(name, "strerror")) {
-        if (named(name, "strerror")) {
+    if (id == BI_REMOVE || id == BI_RENAME || id == BI_GETENV || id == BI_STRERROR) {
+        if (id == BI_STRERROR) {
             int code = small(interpreter, name, args[0]);
             return interpreter->failed ? integer(0) : copy_string(interpreter, name, strerror(code));
         }
         char *path = string(interpreter, name, args[0]);
-        char *target = named(name, "rename") ? string(interpreter, name, args[1]) : NULL;
+        char *target = id == BI_RENAME ? string(interpreter, name, args[1]) : NULL;
         if (interpreter->failed) return integer(0);
-        if (named(name, "getenv")) return copy_string(interpreter, name, getenv(path));
+        if (id == BI_GETENV) return copy_string(interpreter, name, getenv(path));
         int result = target ? rename(path, target) : remove(path);
         set_errno(interpreter, errno);
         return integer(result);
     }
-    size_t stream_index = named(name, "fputc") || named(name, "fputs") || named(name, "putc") ||
-                          named(name, "ungetc") ? 1 : named(name, "fgets") ? 2 :
-                          named(name, "fread") || named(name, "fwrite") ? 3 : 0;
-    if (named(name, "fflush") && ((args[0].type == CT_INT && args[0].as.integer == 0) ||
+    size_t stream_index = id == BI_FPUTC || id == BI_FPUTS || id == BI_PUTC ||
+                          id == BI_UNGETC ? 1 : id == BI_FGETS ? 2 :
+                          id == BI_FREAD || id == BI_FWRITE ? 3 : 0;
+    if (id == BI_FFLUSH && ((args[0].type == CT_INT && args[0].as.integer == 0) ||
         (type_is_pointer(args[0].type) && args[0].as.address == 0))) return integer(fflush(NULL));
     HostFile *file = find_file(interpreter, name, args[stream_index]);
     if (!file) return integer(EOF);
     FILE *stream = file_stream(interpreter, file);
     int result = 0;
-    if (named(name, "fclose")) {
+    if (id == BI_FCLOSE) {
         if (file->standard) return runtime_error(interpreter, name, "closing interpreter-owned standard streams is unsupported");
         result = fclose(stream);
         file->closed = 1;
         (void)memory_release(&interpreter->memory, file->address, 0);
-    } else if (named(name, "fflush")) result = fflush(stream);
-    else if (named(name, "fgetc") || named(name, "getc")) result = fgetc(stream);
-    else if (named(name, "ungetc")) {
+    } else if (id == BI_FFLUSH) result = fflush(stream);
+    else if (id == BI_FGETC || id == BI_GETC) result = fgetc(stream);
+    else if (id == BI_UNGETC) {
         int character = small(interpreter, name, args[0]);
         if (!interpreter->failed) result = ungetc(character, stream);
-    } else if (named(name, "fputc") || named(name, "putc")) {
+    } else if (id == BI_FPUTC || id == BI_PUTC) {
         int character = small(interpreter, name, args[0]);
         if (!interpreter->failed) result = fputc(character, stream);
-    } else if (named(name, "fputs")) {
+    } else if (id == BI_FPUTS) {
         char *text = string(interpreter, name, args[0]);
         if (text) result = fputs(text, stream);
-    } else if (named(name, "fgets")) {
+    } else if (id == BI_FGETS) {
         uint64_t address = pointer(interpreter, name, args[0]);
         int size = small(interpreter, name, args[1]);
         if (size <= 0) return runtime_error(interpreter, name, "fgets size must be positive");
@@ -818,13 +824,13 @@ static CtValue file_call(CtInterpreter *interpreter, Token name, const CtValue *
         if (read) (void)memory_access(&interpreter->memory, address, strlen(read) + 1, 1);
         set_errno(interpreter, errno);
         return (CtValue){.type = CHAR_POINTER, .as.address = read ? address : 0};
-    } else if (named(name, "fread") || named(name, "fwrite")) {
+    } else if (id == BI_FREAD || id == BI_FWRITE) {
         uint64_t address = pointer(interpreter, name, args[0]);
         size_t size = size_argument(interpreter, name, args[1]);
         size_t elements = size_argument(interpreter, name, args[2]);
         if (size && elements > SIZE_MAX / size) return runtime_error(interpreter, name, "file transfer size overflow");
         if (!size || !elements) return integer(0);
-        int reading = named(name, "fread");
+        int reading = id == BI_FREAD;
         void *data = access_memory(interpreter, name, address, size * elements, reading ? 2 : 0);
         if (!data) return integer(0);
         size_t transferred;
@@ -835,21 +841,21 @@ static CtValue file_call(CtInterpreter *interpreter, Token name, const CtValue *
         } else transferred = fwrite(data, size, elements, stream);
         set_errno(interpreter, errno);
         return integer_of(CT_ULONG, (int64_t)transferred);
-    } else if (named(name, "fseek")) {
+    } else if (id == BI_FSEEK) {
         int offset = small(interpreter, name, args[1]);
         int origin = small(interpreter, name, args[2]);
         if (origin != SEEK_SET && origin != SEEK_CUR && origin != SEEK_END) return runtime_error(interpreter, name, "invalid seek origin");
         if (!interpreter->failed) result = fseek(stream, offset, origin);
-    } else if (named(name, "ftell")) {
+    } else if (id == BI_FTELL) {
         long position = ftell(stream);
         set_errno(interpreter, errno);
         return integer_of(CT_LONG, position);
-    } else if (named(name, "rewind")) rewind(stream);
-    else if (named(name, "feof")) result = feof(stream);
-    else if (named(name, "ferror")) result = ferror(stream);
-    else if (named(name, "clearerr")) clearerr(stream);
+    } else if (id == BI_REWIND) rewind(stream);
+    else if (id == BI_FEOF) result = feof(stream);
+    else if (id == BI_FERROR) result = ferror(stream);
+    else if (id == BI_CLEARERR) clearerr(stream);
     set_errno(interpreter, errno);
-    if (named(name, "rewind") || named(name, "clearerr")) return (CtValue){.type = CT_VOID};
+    if (id == BI_REWIND || id == BI_CLEARERR) return (CtValue){.type = CT_VOID};
     return integer(result);
 }
 
@@ -898,8 +904,7 @@ static CtValue interpret(CtInterpreter *interpreter, Token name, CtValue argumen
     return integer(status);
 }
 
-static CtValue va_formatted(CtInterpreter *interpreter, Token name, const CtValue *args, size_t count) {
-    if (!require_count(interpreter, name, count)) return integer(0);
+static CtValue va_formatted(CtInterpreter *interpreter, Token name, size_t id, const CtValue *args, size_t count) {
     const CtValue *remaining = NULL;
     size_t extra = 0, fixed = count - 1;
     if (!runtime_va_values(interpreter, name, args[fixed], &remaining, &extra)) return integer(0);
@@ -910,15 +915,69 @@ static CtValue va_formatted(CtInterpreter *interpreter, Token name, const CtValu
     memcpy(values, args, fixed * sizeof *values);
     if (extra) memcpy(values + fixed, remaining, extra * sizeof *values);
     /* Reuse the checked format engines; host va_list/host addresses never cross
-     * into interpreted memory. Dropping the leading v selects the base routine. */
-    Token base = name;
-    ++base.start;
-    --base.length;
-    int input = named(base, "scanf") || named(base, "sscanf") || named(base, "fscanf");
-    CtValue result = input ? scanned(interpreter, base, values, fixed + extra)
-                           : formatted(interpreter, base, values, fixed + extra);
+     * into interpreted memory. Each v* routine sits a fixed distance after its base. */
+    size_t base = id - (BI_VPRINTF - BI_PRINTF);
+    CtValue result = base >= BI_SCANF ? scanned(interpreter, name, base, values, fixed + extra)
+                                      : formatted(interpreter, name, base, values, fixed + extra);
     if (values != inline_values) free(values);
     return result;
+}
+
+/* Callbacks may allocate or free, so host pointers are fetched again after each one. */
+static int move_bytes(CtInterpreter *interpreter, Token name, uint64_t to, uint64_t from, size_t bytes) {
+    void *source = access_memory(interpreter, name, from, bytes, 0);
+    void *target = source ? access_memory(interpreter, name, to, bytes, 1) : NULL;
+    if (target) memmove(target, source, bytes);
+    return target != NULL;
+}
+
+static int ordered_after(CtInterpreter *interpreter, Token name, CtValue compare, uint64_t left, uint64_t right) {
+    CtValue pair[2] = {{.type = VOID_POINTER, .as.address = left}, {.type = VOID_POINTER, .as.address = right}};
+    CtValue order = runtime_invoke(interpreter, name, compare, pair, 2);
+    return !interpreter->failed && order.as.integer > 0;
+}
+
+/* Bottom-up and stable, like glibc's qsort; the comparator only sees interpreted addresses. */
+static void merge_sort(CtInterpreter *interpreter, Token name, uint64_t base, uint64_t scratch,
+                       size_t elements, size_t width, CtValue compare) {
+    uint64_t from = base, to = scratch;
+    for (size_t run = 1; run < elements && !interpreter->failed; run *= 2) {
+        for (size_t low = 0; low < elements && !interpreter->failed; low += 2 * run) {
+            size_t middle = elements - low > run ? low + run : elements;
+            size_t high = elements - middle > run ? middle + run : elements;
+            size_t left = low, right = middle, out = low;
+            while (left < middle && right < high && !interpreter->failed) {
+                int take_right = ordered_after(interpreter, name, compare, from + left * width, from + right * width);
+                if (interpreter->failed) break;
+                size_t taken = take_right ? right++ : left++;
+                if (!move_bytes(interpreter, name, to + out++ * width, from + taken * width, width)) break;
+            }
+            if (interpreter->failed) break;
+            size_t rest = left < middle ? left : right, end = left < middle ? middle : high;
+            if (end > rest) (void)move_bytes(interpreter, name, to + out * width, from + rest * width, (end - rest) * width);
+        }
+        uint64_t swap = from;
+        from = to;
+        to = swap;
+    }
+    if (!interpreter->failed && from != base) (void)move_bytes(interpreter, name, base, from, elements * width);
+}
+
+static void shell_sort(CtInterpreter *interpreter, Token name, uint64_t base, size_t elements, size_t width, CtValue compare) {
+    unsigned char *swap = malloc(width);
+    if (!swap) { (void)runtime_error(interpreter, name, "out of memory"); return; }
+    for (size_t gap = elements / 2; gap && !interpreter->failed; gap /= 2)
+        for (size_t i = gap; i < elements && !interpreter->failed; ++i)
+            for (size_t j = i; j >= gap; j -= gap) {
+                uint64_t left = base + (j - gap) * width, right = base + j * width;
+                if (!ordered_after(interpreter, name, compare, left, right)) break;
+                unsigned char *data = access_memory(interpreter, name, base, elements * width, 1);
+                if (!data) break;
+                memcpy(swap, data + (j - gap) * width, width);
+                memcpy(data + (j - gap) * width, data + j * width, width);
+                memcpy(data + j * width, swap, width);
+            }
+    free(swap);
 }
 
 CtValue builtin_call(CtInterpreter *interpreter, Token name, size_t id,
@@ -926,10 +985,10 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, size_t id,
     const Signature *signature = id < builtin_count() ? &signatures[id] : NULL;
     if (!signature || (signature->arity != VARIADIC && signature->arity != count))
         return runtime_error(interpreter, name, "incorrect number of library arguments");
-    if (id >= BI_VPRINTF && id <= BI_VFSCANF) return va_formatted(interpreter, name, args, count);
-    if (id <= BI_FPRINTF) return formatted(interpreter, name, args, count);
-    if (id >= BI_SCANF && id <= BI_FSCANF) return scanned(interpreter, name, args, count);
-    if (id >= BI_FOPEN && id <= BI_STRERROR) return file_call(interpreter, name, args, count);
+    if (id >= BI_VPRINTF && id <= BI_VFSCANF) return va_formatted(interpreter, name, id, args, count);
+    if (id <= BI_FPRINTF) return formatted(interpreter, name, id, args, count);
+    if (id >= BI_SCANF && id <= BI_FSCANF) return scanned(interpreter, name, id, args, count);
+    if (id >= BI_FOPEN && id <= BI_STRERROR) return file_call(interpreter, name, id, args);
     if ((id >= BI_STRLEN && id <= BI_STRPBRK) || (id >= BI_ATOI && id <= BI_ATOF)) goto string_functions;
     if (id >= BI_MEMCPY && id <= BI_MEMCHR) goto memory_functions;
     if (id == BI_STRTOL || id == BI_STRTOD) goto number_conversion;
@@ -937,35 +996,35 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, size_t id,
     if (id == BI_QSORT || id == BI_BSEARCH) goto search_functions;
     if (id >= BI_ISDIGIT && id <= BI_TOLOWER) goto character_functions;
     if (id >= BI_SQRT && id <= BI_COPYSIGN) goto math_functions;
-    if (named(name, "getchar")) return integer(fgetc(interpreter->input));
-    if (named(name, "clock")) return integer_of(CT_LONG, (int64_t)clock());
-    if (named(name, "rand")) {
+    if (id == BI_GETCHAR) return integer(fgetc(interpreter->input));
+    if (id == BI_CLOCK) return integer_of(CT_LONG, (int64_t)clock());
+    if (id == BI_RAND) {
         interpreter->random_state = interpreter->random_state * 1103515245u + 12345u;
         return integer((int)((interpreter->random_state / 65536u) % 32768u));
     }
-    if (named(name, "abort")) return runtime_error(interpreter, name, "the program called abort");
-    if (named(name, "interpret_depth")) return integer((int)interpreter->nesting);
-    if (named(name, "interpret")) return interpret(interpreter, name, args[0]);
-    if (named(name, "puts")) {
+    if (id == BI_ABORT) return runtime_error(interpreter, name, "the program called abort");
+    if (id == BI_INTERPRET_DEPTH) return integer((int)interpreter->nesting);
+    if (id == BI_INTERPRET) return interpret(interpreter, name, args[0]);
+    if (id == BI_PUTS) {
         char *text = string(interpreter, name, args[0]);
         if (!text) return integer(EOF);
         int result = fputs(text, interpreter->output);
         return integer(result < 0 || fputc('\n', interpreter->output) == EOF ? EOF : 0);
     }
-    if (named(name, "putchar")) {
+    if (id == BI_PUTCHAR) {
         int character = small(interpreter, name, args[0]);
         return integer(interpreter->failed ? EOF : fputc(character, interpreter->output));
     }
-    if (named(name, "malloc") || named(name, "calloc") || named(name, "realloc")) {
-        size_t size = size_argument(interpreter, name, args[named(name, "realloc") ? 1 : 0]);
-        if (named(name, "calloc")) {
+    if (id == BI_MALLOC || id == BI_CALLOC || id == BI_REALLOC) {
+        size_t size = size_argument(interpreter, name, args[id == BI_REALLOC ? 1 : 0]);
+        if (id == BI_CALLOC) {
             size_t elements = size_argument(interpreter, name, args[1]);
             if (elements && size > SIZE_MAX / elements) return runtime_error(interpreter, name, "allocation size overflow");
             size *= elements;
         }
         uint64_t old_address = 0;
         Allocation *old = NULL;
-        if (named(name, "realloc")) {
+        if (id == BI_REALLOC) {
             old_address = pointer(interpreter, name, args[0]);
             if (old_address) {
                 old = memory_find(&interpreter->memory, old_address);
@@ -974,7 +1033,7 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, size_t id,
             }
         }
         if (interpreter->failed) return integer(0);
-        uint64_t address = memory_allocate(&interpreter->memory, size, named(name, "calloc"), 1);
+        uint64_t address = memory_allocate(&interpreter->memory, size, id == BI_CALLOC, 1);
         if (!address) return runtime_error(interpreter, name, interpreter->memory.error);
         if (old) {
             Allocation *target = memory_find(&interpreter->memory, address);
@@ -986,66 +1045,66 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, size_t id,
         }
         return (CtValue){.type = VOID_POINTER, .as.address = address};
     }
-    if (named(name, "free")) {
+    if (id == BI_FREE) {
         uint64_t address = pointer(interpreter, name, args[0]);
         if (!interpreter->failed && !memory_release(&interpreter->memory, address, 1))
             return runtime_error(interpreter, name, interpreter->memory.error);
         return (CtValue){.type = CT_VOID};
     }
 string_functions:
-    if (named(name, "strlen") || named(name, "strcmp") || named(name, "strncmp") || named(name, "strcpy") ||
-        named(name, "strncpy") || named(name, "strcat") || named(name, "strncat") || named(name, "strchr") ||
-        named(name, "strrchr") || named(name, "strstr") || named(name, "strspn") || named(name, "strcspn") ||
-        named(name, "strpbrk") || named(name, "atoi") || named(name, "atol") || named(name, "atof")) {
-        int copying = named(name, "strcpy") || named(name, "strncpy");
-        int character_argument = named(name, "strchr") || named(name, "strrchr");
+    if (id == BI_STRLEN || id == BI_STRCMP || id == BI_STRNCMP || id == BI_STRCPY ||
+        id == BI_STRNCPY || id == BI_STRCAT || id == BI_STRNCAT || id == BI_STRCHR ||
+        id == BI_STRRCHR || id == BI_STRSTR || id == BI_STRSPN || id == BI_STRCSPN ||
+        id == BI_STRPBRK || id == BI_ATOI || id == BI_ATOL || id == BI_ATOF) {
+        int copying = id == BI_STRCPY || id == BI_STRNCPY;
+        int character_argument = id == BI_STRCHR || id == BI_STRRCHR;
         char *a = copying ? NULL : string(interpreter, name, args[0]);
         char *b = count > 1 && !character_argument ? string(interpreter, name, args[1]) : NULL;
         if (interpreter->failed) return integer(0);
-        if (named(name, "strlen")) return integer_of(CT_ULONG, (int64_t)strlen(a));
-        if (named(name, "atoi") || named(name, "atol")) {
+        if (id == BI_STRLEN) return integer_of(CT_ULONG, (int64_t)strlen(a));
+        if (id == BI_ATOI || id == BI_ATOL) {
             errno = 0;
             long value = strtol(a, NULL, 10);
-            int wide = named(name, "atol");
+            int wide = id == BI_ATOL;
             if (errno == ERANGE || (!wide && (value < INT_MIN || value > INT_MAX)))
                 return runtime_error(interpreter, name, "the parsed value is out of range");
             return integer_of(wide ? CT_LONG : CT_INT, value);
         }
-        if (named(name, "atof")) {
+        if (id == BI_ATOF) {
             errno = 0;
             double value = strtod(a, NULL);
             if (errno == ERANGE || !isfinite(value)) return runtime_error(interpreter, name, "atof result out of range");
             return (CtValue){.type = CT_DOUBLE, .as.real = value};
         }
-        if (named(name, "strcmp")) return integer(strcmp(a, b));
-        if (named(name, "strncmp")) {
+        if (id == BI_STRCMP) return integer(strcmp(a, b));
+        if (id == BI_STRNCMP) {
             size_t n = size_argument(interpreter, name, args[2]);
             return interpreter->failed ? integer(0) : integer(strncmp(a, b, n));
         }
-        if (named(name, "strspn")) return integer_of(CT_ULONG, (int64_t)strspn(a, b));
-        if (named(name, "strcspn")) return integer_of(CT_ULONG, (int64_t)strcspn(a, b));
-        if (named(name, "strchr") || named(name, "strrchr") || named(name, "strstr") || named(name, "strpbrk")) {
-            int character = named(name, "strstr") || named(name, "strpbrk") ? 0 : small(interpreter, name, args[1]);
+        if (id == BI_STRSPN) return integer_of(CT_ULONG, (int64_t)strspn(a, b));
+        if (id == BI_STRCSPN) return integer_of(CT_ULONG, (int64_t)strcspn(a, b));
+        if (id == BI_STRCHR || id == BI_STRRCHR || id == BI_STRSTR || id == BI_STRPBRK) {
+            int character = id == BI_STRSTR || id == BI_STRPBRK ? 0 : small(interpreter, name, args[1]);
             if (interpreter->failed) return integer(0);
-            char *found = named(name, "strchr") ? strchr(a, character)
-                        : named(name, "strrchr") ? strrchr(a, character)
-                        : named(name, "strpbrk") ? strpbrk(a, b) : strstr(a, b);
+            char *found = id == BI_STRCHR ? strchr(a, character)
+                        : id == BI_STRRCHR ? strrchr(a, character)
+                        : id == BI_STRPBRK ? strpbrk(a, b) : strstr(a, b);
             return (CtValue){.type = CHAR_POINTER, .as.address = found ? args[0].as.address + (uint64_t)(found - a) : 0};
         }
         uint64_t address = pointer(interpreter, name, args[0]);
-        int appending = named(name, "strcat") || named(name, "strncat");
+        int appending = id == BI_STRCAT || id == BI_STRNCAT;
         size_t prefix = appending ? strlen(a) : 0;
-        size_t limit = named(name, "strncpy") || named(name, "strncat") ? size_argument(interpreter, name, args[2]) : 0;
-        size_t bytes = named(name, "strncpy") ? limit
-                     : named(name, "strncat") ? (strlen(b) < limit ? strlen(b) : limit) + 1
+        size_t limit = id == BI_STRNCPY || id == BI_STRNCAT ? size_argument(interpreter, name, args[2]) : 0;
+        size_t bytes = id == BI_STRNCPY ? limit
+                     : id == BI_STRNCAT ? (strlen(b) < limit ? strlen(b) : limit) + 1
                      : strlen(b) + 1;
         char *destination = access_memory(interpreter, name, address + prefix, bytes, 1);
         if (destination) {
-            if (named(name, "strncpy")) {
+            if (id == BI_STRNCPY) {
                 size_t copied = strlen(b) < bytes ? strlen(b) : bytes;
                 memmove(destination, b, copied);
                 memset(destination + copied, 0, bytes - copied);
-            } else if (named(name, "strncat")) {
+            } else if (id == BI_STRNCAT) {
                 memmove(destination, b, bytes - 1);
                 destination[bytes - 1] = '\0';
             } else memmove(destination, b, bytes);
@@ -1053,7 +1112,7 @@ string_functions:
         return (CtValue){.type = CHAR_POINTER, .as.address = address};
     }
 memory_functions:
-    if (named(name, "memchr")) {
+    if (id == BI_MEMCHR) {
         uint64_t address = pointer(interpreter, name, args[0]);
         int character = small(interpreter, name, args[1]);
         size_t bytes = size_argument(interpreter, name, args[2]);
@@ -1062,10 +1121,10 @@ memory_functions:
         unsigned char *found = memchr(data, character, bytes);
         return (CtValue){.type = VOID_POINTER, .as.address = found ? address + (uint64_t)(found - (unsigned char *)data) : 0};
     }
-    if (named(name, "memcpy") || named(name, "memmove") || named(name, "memset") || named(name, "memcmp")) {
+    if (id == BI_MEMCPY || id == BI_MEMMOVE || id == BI_MEMSET || id == BI_MEMCMP) {
         uint64_t destination = pointer(interpreter, name, args[0]);
         size_t bytes = size_argument(interpreter, name, args[2]);
-        int setting = named(name, "memset"), comparing = named(name, "memcmp");
+        int setting = id == BI_MEMSET, comparing = id == BI_MEMCMP;
         int character = setting ? small(interpreter, name, args[1]) : 0;
         uint64_t source = setting ? 0 : pointer(interpreter, name, args[1]);
         void *from = setting ? NULL : access_memory(interpreter, name, source, bytes, 0);
@@ -1076,14 +1135,14 @@ memory_functions:
         else memmove(to, from, bytes);
         return (CtValue){.type = VOID_POINTER, .as.address = destination};
     }
-    if (named(name, "perror")) {
+    if (id == BI_PERROR) {
         char *prefix = string(interpreter, name, args[0]);
         if (!interpreter->failed)
             fprintf(interpreter->errors, "%s%s%s\n", prefix && *prefix ? prefix : "",
                     prefix && *prefix ? ": " : "", strerror(get_errno(interpreter)));
         return (CtValue){.type = CT_VOID};
     }
-    if (named(name, "time")) {
+    if (id == BI_TIME) {
         time_t now = time(NULL);
         if (now == (time_t)-1) return runtime_error(interpreter, name, "the clock is unavailable");
         CtValue seconds = integer_of(CT_LONG, (int64_t)now);
@@ -1092,7 +1151,7 @@ memory_functions:
             return runtime_error(interpreter, name, interpreter->memory.error);
         return seconds;
     }
-    if (named(name, "__assert_fail")) {
+    if (id == BI_ASSERT_FAIL) {
         char *expression = string(interpreter, name, args[0]);
         char *file = string(interpreter, name, args[1]);
         int line = small(interpreter, name, args[2]);
@@ -1102,17 +1161,17 @@ memory_functions:
         return runtime_error(interpreter, name, message);
     }
 number_conversion:
-    if (named(name, "strtol") || named(name, "strtod")) {
+    if (id == BI_STRTOL || id == BI_STRTOD) {
         char *text = string(interpreter, name, args[0]);
-        int base = named(name, "strtol") ? small(interpreter, name, args[2]) : 0;
+        int base = id == BI_STRTOL ? small(interpreter, name, args[2]) : 0;
         if (interpreter->failed) return integer(0);
-        if (named(name, "strtol") && base != 0 && (base < 2 || base > 36))
+        if (id == BI_STRTOL && base != 0 && (base < 2 || base > 36))
             return runtime_error(interpreter, name, "strtol requires a base of 0 or 2 through 36");
         char *end = NULL;
         errno = 0;
         double real_result = 0;
         long integer_result = 0;
-        if (named(name, "strtol")) integer_result = strtol(text, &end, base);
+        if (id == BI_STRTOL) integer_result = strtol(text, &end, base);
         else real_result = strtod(text, &end);
         set_errno(interpreter, errno);
         uint64_t destination = pointer(interpreter, name, args[1]);
@@ -1121,11 +1180,11 @@ number_conversion:
             if (!memory_write(&interpreter->memory, destination, position))
                 return runtime_error(interpreter, name, interpreter->memory.error);
         }
-        if (named(name, "strtod")) return (CtValue){.type = CT_DOUBLE, .as.real = real_result};
+        if (id == BI_STRTOD) return (CtValue){.type = CT_DOUBLE, .as.real = real_result};
         return integer_of(CT_LONG, integer_result);
     }
 tokenize:
-    if (named(name, "strtok")) {
+    if (id == BI_STRTOK) {
         char *separators = string(interpreter, name, args[1]);
         uint64_t address = args[0].type == CT_INT && !args[0].as.integer ? 0 : pointer(interpreter, name, args[0]);
         if (!address) address = interpreter->token_state;
@@ -1144,8 +1203,8 @@ tokenize:
         return (CtValue){.type = CHAR_POINTER, .as.address = address + start};
     }
 search_functions:
-    if (named(name, "qsort") || named(name, "bsearch")) {
-        int searching = named(name, "bsearch");
+    if (id == BI_QSORT || id == BI_BSEARCH) {
+        int searching = id == BI_BSEARCH;
         uint64_t base = pointer(interpreter, name, args[searching]);
         size_t elements = size_argument(interpreter, name, args[searching + 1]);
         size_t width = size_argument(interpreter, name, args[searching + 2]);
@@ -1171,24 +1230,15 @@ search_functions:
             }
             return (CtValue){.type = VOID_POINTER};
         }
-        unsigned char *scratch = malloc(width);
-        if (!scratch) return runtime_error(interpreter, name, "out of memory");
-        for (size_t gap = elements / 2; gap && !interpreter->failed; gap /= 2)
-            for (size_t i = gap; i < elements && !interpreter->failed; ++i)
-                for (size_t j = i; j >= gap; j -= gap) {
-                    pair[0] = (CtValue){.type = VOID_POINTER, .as.address = base + (j - gap) * width};
-                    pair[1] = (CtValue){.type = VOID_POINTER, .as.address = base + j * width};
-                    CtValue order = runtime_invoke(interpreter, name, compare, pair, 2);
-                    if (interpreter->failed || order.as.integer <= 0) break;
-                    memcpy(scratch, data + (j - gap) * width, width);
-                    memcpy(data + (j - gap) * width, data + j * width, width);
-                    memcpy(data + j * width, scratch, width);
-                }
-        free(scratch);
+        uint64_t scratch = memory_allocate(&interpreter->memory, elements * width, 0, 0);
+        if (scratch) {
+            merge_sort(interpreter, name, base, scratch, elements, width, compare);
+            (void)memory_release(&interpreter->memory, scratch, 0);
+        } else shell_sort(interpreter, name, base, elements, width, compare);
         return (CtValue){.type = CT_VOID};
     }
-    if (named(name, "exit") || named(name, "srand") || named(name, "abs") || named(name, "labs")) {
-        if (named(name, "labs")) {
+    if (id == BI_EXIT || id == BI_SRAND || id == BI_ABS || id == BI_LABS) {
+        if (id == BI_LABS) {
             int64_t wide = number(interpreter, name, args[0]);
             if (interpreter->failed) return integer(0);
             if (wide == INT64_MIN) return runtime_error(interpreter, name, "labs result overflows long");
@@ -1196,29 +1246,29 @@ search_functions:
         }
         int value = small(interpreter, name, args[0]);
         if (interpreter->failed) return integer(0);
-        if (named(name, "exit")) { interpreter->exit_requested = 1; interpreter->exit_status = value; return (CtValue){.type = CT_VOID}; }
-        if (named(name, "srand")) { interpreter->random_state = (unsigned)value; return (CtValue){.type = CT_VOID}; }
+        if (id == BI_EXIT) { interpreter->exit_requested = 1; interpreter->exit_status = value; return (CtValue){.type = CT_VOID}; }
+        if (id == BI_SRAND) { interpreter->random_state = (unsigned)value; return (CtValue){.type = CT_VOID}; }
         if (value == INT_MIN) return runtime_error(interpreter, name, "abs result overflows int");
-        return integer_of(named(name, "labs") ? CT_LONG : CT_INT, abs(value));
+        return integer_of(id == BI_LABS ? CT_LONG : CT_INT, abs(value));
     }
 character_functions:
-    if ((name.length >= 2 && !memcmp(name.start, "is", 2)) || named(name, "toupper") || named(name, "tolower")) {
+    if ((id >= BI_ISDIGIT && id <= BI_ISBLANK) || id == BI_TOUPPER || id == BI_TOLOWER) {
         int value = small(interpreter, name, args[0]);
         if (value != EOF && (value < 0 || value > UCHAR_MAX)) return runtime_error(interpreter, name, "ctype requires an unsigned char or EOF");
         if (interpreter->failed) return integer(0);
-        if (named(name, "isdigit")) return integer(isdigit(value));
-        if (named(name, "isalpha")) return integer(isalpha(value));
-        if (named(name, "isalnum")) return integer(isalnum(value));
-        if (named(name, "isspace")) return integer(isspace(value));
-        if (named(name, "isupper")) return integer(isupper(value));
-        if (named(name, "islower")) return integer(islower(value));
-        if (named(name, "ispunct")) return integer(ispunct(value));
-        if (named(name, "isprint")) return integer(isprint(value));
-        if (named(name, "isgraph")) return integer(isgraph(value));
-        if (named(name, "iscntrl")) return integer(iscntrl(value));
-        if (named(name, "isxdigit")) return integer(isxdigit(value));
-        if (named(name, "isblank")) return integer(value == ' ' || value == '\t');
-        return integer(named(name, "toupper") ? toupper(value) : tolower(value));
+        if (id == BI_ISDIGIT) return integer(isdigit(value));
+        if (id == BI_ISALPHA) return integer(isalpha(value));
+        if (id == BI_ISALNUM) return integer(isalnum(value));
+        if (id == BI_ISSPACE) return integer(isspace(value));
+        if (id == BI_ISUPPER) return integer(isupper(value));
+        if (id == BI_ISLOWER) return integer(islower(value));
+        if (id == BI_ISPUNCT) return integer(ispunct(value));
+        if (id == BI_ISPRINT) return integer(isprint(value));
+        if (id == BI_ISGRAPH) return integer(isgraph(value));
+        if (id == BI_ISCNTRL) return integer(iscntrl(value));
+        if (id == BI_ISXDIGIT) return integer(isxdigit(value));
+        if (id == BI_ISBLANK) return integer(value == ' ' || value == '\t');
+        return integer(id == BI_TOUPPER ? toupper(value) : tolower(value));
     }
 math_functions:
     (void)0;
@@ -1227,41 +1277,43 @@ math_functions:
     if (interpreter->failed) return integer(0);
     double value = 0;
     errno = 0;
-    if (named(name, "sqrt")) value = sqrt(a);
-    else if (named(name, "cbrt")) value = cbrt(a);
-    else if (named(name, "hypot")) value = hypot(a, b);
-    else if (named(name, "sinh")) value = sinh(a);
-    else if (named(name, "cosh")) value = cosh(a);
-    else if (named(name, "tanh")) value = tanh(a);
-    else if (named(name, "asinh")) value = asinh(a);
-    else if (named(name, "acosh")) value = acosh(a);
-    else if (named(name, "atanh")) value = atanh(a);
-    else if (named(name, "exp2")) value = exp2(a);
-    else if (named(name, "log2")) value = log2(a);
-    else if (named(name, "ldexp")) value = ldexp(a, (int)b);
-    else if (named(name, "fmin")) value = fmin(a, b);
-    else if (named(name, "fmax")) value = fmax(a, b);
-    else if (named(name, "fdim")) value = fdim(a, b);
-    else if (named(name, "copysign")) value = copysign(a, b);
-    else if (named(name, "difftime")) value = a - b;
-    else if (named(name, "pow")) value = pow(a, b);
-    else if (named(name, "sin")) value = sin(a);
-    else if (named(name, "cos")) value = cos(a);
-    else if (named(name, "tan")) value = tan(a);
-    else if (named(name, "asin")) value = asin(a);
-    else if (named(name, "acos")) value = acos(a);
-    else if (named(name, "atan")) value = atan(a);
-    else if (named(name, "atan2")) value = atan2(a, b);
-    else if (named(name, "exp")) value = exp(a);
-    else if (named(name, "log")) value = log(a);
-    else if (named(name, "log10")) value = log10(a);
-    else if (named(name, "floor")) value = floor(a);
-    else if (named(name, "ceil")) value = ceil(a);
-    else if (named(name, "round")) value = round(a);
-    else if (named(name, "trunc")) value = trunc(a);
-    else if (named(name, "fabs")) value = fabs(a);
-    else if (named(name, "fmod")) value = fmod(a, b);
-    else return runtime_error(interpreter, name, "unknown library function");
+    switch (id) {
+        case BI_SQRT: value = sqrt(a); break;
+        case BI_CBRT: value = cbrt(a); break;
+        case BI_HYPOT: value = hypot(a, b); break;
+        case BI_SINH: value = sinh(a); break;
+        case BI_COSH: value = cosh(a); break;
+        case BI_TANH: value = tanh(a); break;
+        case BI_ASINH: value = asinh(a); break;
+        case BI_ACOSH: value = acosh(a); break;
+        case BI_ATANH: value = atanh(a); break;
+        case BI_EXP2: value = exp2(a); break;
+        case BI_LOG2: value = log2(a); break;
+        case BI_LDEXP: value = ldexp(a, (int)b); break;
+        case BI_FMIN: value = fmin(a, b); break;
+        case BI_FMAX: value = fmax(a, b); break;
+        case BI_FDIM: value = fdim(a, b); break;
+        case BI_COPYSIGN: value = copysign(a, b); break;
+        case BI_DIFFTIME: value = a - b; break;
+        case BI_POW: value = pow(a, b); break;
+        case BI_SIN: value = sin(a); break;
+        case BI_COS: value = cos(a); break;
+        case BI_TAN: value = tan(a); break;
+        case BI_ASIN: value = asin(a); break;
+        case BI_ACOS: value = acos(a); break;
+        case BI_ATAN: value = atan(a); break;
+        case BI_ATAN2: value = atan2(a, b); break;
+        case BI_EXP: value = exp(a); break;
+        case BI_LOG: value = log(a); break;
+        case BI_LOG10: value = log10(a); break;
+        case BI_FLOOR: value = floor(a); break;
+        case BI_CEIL: value = ceil(a); break;
+        case BI_ROUND: value = round(a); break;
+        case BI_TRUNC: value = trunc(a); break;
+        case BI_FABS: value = fabs(a); break;
+        case BI_FMOD: value = fmod(a, b); break;
+        default: return runtime_error(interpreter, name, "unknown library function");
+    }
     if (errno == EDOM || errno == ERANGE || !isfinite(value)) return runtime_error(interpreter, name, "math result is outside its domain or range");
     return (CtValue){.type = CT_DOUBLE, .as.real = value};
 }

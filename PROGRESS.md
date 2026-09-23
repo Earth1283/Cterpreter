@@ -1,5 +1,19 @@
 # Misendeavor log
 
+## 2026-09-23 — 0.3.1: interpreter performance
+
+Profiling with callgrind showed the time going to bookkeeping rather than to the programs: every local variable cost two host allocations, every name use rehashed its text and walked the scope chain, builtins were dispatched by comparing name strings, and `qsort` was a shell sort that called the interpreted comparator O(n^1.5) times. Measured as best of five runs against the previous commit, the benchmark set (ten micro-benchmarks plus the playground) went from 10.6 s to 3.9 s, **2.7× faster** overall: the donut 6.6 s → 2.4 s, Life 1.9 s → 0.76 s, recursive `fib(25)` 2.5×, and a 20,000-element `qsort` 4.6×. All diagnostics, strict-mode behaviour, and example outputs are unchanged.
+
+- Scalars and small aggregates keep their bytes inside the allocation record, and records are recycled once forgotten, so declaring a local no longer touches the host allocator. Lookups check the most recently used record first and binary-search a contiguous address array.
+- A name's resolution is cached on its node and revalidated by scope-instance serial and symbol count. Each scope carries a 128-bit filter of its declared names, and each local declaration knows its innermost live symbol, so a cached resolution survives a block being re-entered on every loop iteration without rescanning the chain.
+- Scalar reads and writes through a variable decode its record directly; `int` and `double` arithmetic take a fast path; `switch` labels are validated and evaluated once instead of pairwise on every execution; the type of a `?:` expression and a `goto`'s label are cached.
+- Builtins dispatch on an integer id. `qsort` is a stable bottom-up merge sort, which matches glibc's order for equal keys; the shell sort remains as a fallback when the scratch buffer would exceed the memory limit. `printf` copies literal runs in one step and formats each conversion once.
+- Function pointers resolve by binary search, the lexer matches operators with a switch instead of 22 string comparisons, and the preprocessor emits punctuation runs whole.
+
+### Parsing its own source
+
+Cterpreter could not get past the first lines of its own files. It now parses and loads all seven files of its interpreter core, plus `boot.c`. That needed `signal.h`, `inttypes.h`, and the rest of `stdint.h`; `_Static_assert`; the comma operator; repeated file-scope declarations joined by `extern`; and `sizeof` of earlier-declared objects folded in constant expressions. Including a header that carries declarations no longer shifts diagnostic line numbers. Running itself still needs the POSIX headers the command-line front end uses, and a way to link several source files into one program.
+
 ## 2026-09-21 — CLI preferences and presentation
 
 The REPL now has a `.config` command with independent controls for plain-language syntax tips, automatic highlighting, suggestions/Tab completion, function signatures, live diagnostics, and the color mode. Changes apply immediately. `.config reset` restores defaults in memory; `.config save` writes `~/.cterpreterrc` through a temporary file and rename. Startup reads that file, `--config FILE` selects another path, `--no-config` skips loading, and `--color` overrides a saved color mode. Invalid files are rejected without partially applying their settings.

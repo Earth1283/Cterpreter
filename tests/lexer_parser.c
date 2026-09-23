@@ -135,10 +135,10 @@ int main(void) {
     int keywords[] = {TK_STRUCT, TK_UNION, TK_TYPEDEF, TK_ENUM, TK_GENERIC, TK_SIZEOF, TK_ALIGNOF,
                       TK_SWITCH, TK_CASE, TK_DEFAULT, TK_GOTO, TK_STATIC, TK_CONST, TK_DO,
                       TK_SIGNED, TK_UNSIGNED, TK_SHORT, TK_LONG, TK_FLOAT, TK_BOOL,
-                      TK_VOLATILE, TK_RESTRICT, TK_EXTERN, TK_REGISTER, TK_INLINE, TK_AUTO};
+                      TK_VOLATILE, TK_RESTRICT, TK_EXTERN, TK_REGISTER, TK_INLINE, TK_AUTO, TK_STATIC_ASSERT};
     expect_tokens("struct union typedef enum _Generic sizeof _Alignof switch case default goto static const do "
-                  "signed unsigned short long float _Bool volatile restrict extern register inline auto",
-                  keywords, 26);
+                  "signed unsigned short long float _Bool volatile restrict extern register inline auto _Static_assert",
+                  keywords, 27);
     int commented[] = {TK_INT, TK_NAME, ';'};
     expect_tokens("int /* here */ value; // and here", commented, 3);
 
@@ -230,6 +230,13 @@ int main(void) {
     expect_tree("long unsigned int mixed;", "declaration mixed : unsigned long");
     expect_tree("volatile const float ratio;", "declaration ratio : float");
     expect_parse("long double wide;", CT_ERROR);
+    expect_tree("a = 1, b = 2;", "comma ,");
+    expect_tree("f((1, 2), 3);", "comma ,");
+    expect_parse("int bound[(1, 2)];", CT_ERROR);
+    expect_parse("int items[4]; int count[sizeof items / sizeof items[0]];", CT_OK);
+    expect_parse("_Static_assert(sizeof(int) == 4, \"int\");", CT_OK);
+    expect_parse("_Static_assert(0, \"always\");", CT_ERROR);
+    expect_parse("_Static_assert(1);", CT_ERROR);
     expect_parse("short long confused;", CT_ERROR);
     expect_parse("unsigned double wrong;", CT_ERROR);
 

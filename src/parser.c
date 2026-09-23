@@ -30,17 +30,20 @@ typedef struct {
     size_t nodes;
     unsigned depth, loops, functions, switches, scope;
     Alias *aliases;
+    Alias *objects; /* kept apart so that type-name lookups never walk them */
     CtType function_type;
 } Parser;
 
 typedef struct { Lexer lexer; Token token; } Position;
 
-static void fail(Parser *parser, const char *message) {
+static void fail_at(Parser *parser, Token token, const char *message) {
     if (parser->status != CT_OK) return;
-    parser->status = parser->token.kind == TK_EOF ? CT_INCOMPLETE : CT_ERROR;
-    *parser->error = (CtError){.line = parser->token.line, .column = parser->token.column};
+    parser->status = token.kind == TK_EOF ? CT_INCOMPLETE : CT_ERROR;
+    *parser->error = (CtError){.line = token.line, .column = token.column};
     (void)snprintf(parser->error->message, sizeof parser->error->message, "%s", message);
 }
+
+static void fail(Parser *parser, const char *message) { fail_at(parser, parser->token, message); }
 
 static void next(Parser *parser) {
     if (parser->status != CT_OK) return;
@@ -90,10 +93,6 @@ static Node *node(Parser *parser, NodeKind kind, Token token) {
     return result;
 }
 
-int is_assignment(int kind) {
-    return kind == '=' || (kind >= TK_ADD_ASSIGN && kind <= TK_SHR_ASSIGN);
-}
-
 static int precedence(int kind) {
     if (is_assignment(kind)) return 1;
     switch (kind) {
@@ -113,9 +112,11 @@ static int precedence(int kind) {
 }
 
 static Node *expression(Parser *parser, int minimum);
+static Node *comma_expression(Parser *parser);
 static Node *statement(Parser *parser, int top_level);
 static Node *initializer(Parser *parser);
-static CtType type_specifier(Parser *parser, int *is_static, int *is_const, Node ***tail);
+static Node *static_assertion(Parser *parser);
+static CtType type_specifier(Parser *parser, int *storage, int *is_const, Node ***tail);
 static CtType declarator(Parser *parser, CtType base, Token *name, Node **parameters, int *variadic);
 static int is_qualifier(int kind);
 
@@ -159,12 +160,42 @@ static void declare_alias(Parser *parser, Node *entry) {
     parser->unit->has_functions = 1;
 }
 
-static void pop_aliases(Parser *parser) {
-    while (parser->aliases && parser->aliases->scope > parser->scope) {
-        Alias *dead = parser->aliases;
-        parser->aliases = dead->next;
+/* Objects are remembered only while their scope is open, for sizeof in constant expressions. */
+static void declare_object(Parser *parser, Node *declaration) {
+    if (!declaration->token.length) return;
+    Alias *object = calloc(1, sizeof *object);
+    if (!object) { fail(parser, "out of memory"); parser->status = CT_ERROR; return; }
+    object->node = declaration;
+    object->scope = parser->scope;
+    object->next = parser->objects;
+    parser->objects = object;
+}
+
+static Node *find_object(Parser *parser, Token token) {
+    for (Alias *object = parser->objects; object; object = object->next)
+        if (same_name(object->node->token, token)) return object->node;
+    return NULL;
+}
+
+static void pop_scoped(Alias **list, unsigned scope) {
+    while (*list && (*list)->scope > scope) {
+        Alias *dead = *list;
+        *list = dead->next;
         free(dead);
     }
+}
+
+static void free_aliases(Alias *list) {
+    while (list) {
+        Alias *next = list->next;
+        free(list);
+        list = next;
+    }
+}
+
+static void pop_aliases(Parser *parser) {
+    pop_scoped(&parser->aliases, parser->scope);
+    pop_scoped(&parser->objects, parser->scope);
 }
 
 static Node *declare_tag(Parser *parser, Token tag, CtType type, int tag_kind) {
@@ -188,6 +219,45 @@ static int begins_type(Parser *parser, Token token) {
     }
 }
 
+/* The type sizeof sees, for the operand forms whose type is known while parsing. */
+static int operand_type(Parser *parser, Node *operand, CtType *type) {
+    CtType inner;
+    switch (operand->kind) {
+        case N_NAME: {
+            Node *object = find_object(parser, operand->token);
+            if (!object) return 0;
+            *type = object->type;
+            return 1;
+        }
+        case N_STRING: *type = type_array(CT_CHAR, operand->text_length + 1); return 1;
+        case N_VALUE: *type = operand->token.value.type; return 1;
+        case N_CAST: case N_COMPOUND: *type = operand->type; return 1;
+        case N_SIZEOF: case N_ALIGNOF: *type = CT_ULONG; return 1;
+        case N_INDEX:
+            if (!operand_type(parser, operand->left, &inner) || !type_is_pointer(inner = type_decay(inner))) return 0;
+            *type = type_target(inner);
+            return 1;
+        case N_UNARY:
+            if (!operand_type(parser, operand->left, &inner)) return 0;
+            if (operand->token.kind == '&') { *type = type_pointer(inner); return 1; }
+            if (operand->token.kind != '*' || !type_is_pointer(inner = type_decay(inner))) return 0;
+            *type = type_target(inner);
+            return 1;
+        case N_MEMBER: {
+            if (!operand_type(parser, operand->left, &inner)) return 0;
+            if (operand->through_pointer) {
+                if (!type_is_pointer(inner = type_decay(inner))) return 0;
+                inner = type_target(inner);
+            }
+            const Member *member = type_member(inner, operand->token.start, operand->token.length);
+            if (!member) return 0;
+            *type = member->type;
+            return 1;
+        }
+        default: return 0;
+    }
+}
+
 /* Folds the constant expressions the language needs before execution: array
  * bounds, enumerator values and array designators. Works in long long. */
 static int constant_value(Parser *parser, Node *source, int64_t *result) {
@@ -205,8 +275,10 @@ static int constant_value(Parser *parser, Node *source, int64_t *result) {
             return 1;
         }
         case N_SIZEOF: case N_ALIGNOF: {
-            if (source->left) return 0;
-            size_t size = source->kind == N_SIZEOF ? ct_type_size(source->type) : ct_type_align(source->type);
+            CtType type = source->type;
+            if (source->left && !operand_type(parser, source->left, &type)) return 0;
+            if (!type_info(type)->complete) return 0;
+            size_t size = source->kind == N_SIZEOF ? ct_type_size(type) : ct_type_align(type);
             if (!size || size > INT64_MAX) return 0;
             *result = (int64_t)size;
             return 1;
@@ -307,8 +379,8 @@ static void parameter_list(Parser *parser, Suffix *suffix) {
             suffix->variadic = 1;
             break;
         }
-        int is_static = 0, is_const = 0;
-        CtType base = type_specifier(parser, &is_static, &is_const, NULL);
+        int storage = 0, is_const = 0;
+        CtType base = type_specifier(parser, &storage, &is_const, NULL);
         Token name;
         CtType type = type_decay(declarator(parser, base, &name, NULL, NULL));
         if (parser->status != CT_OK) return;
@@ -402,8 +474,8 @@ static CtType declarator(Parser *parser, CtType base, Token *name, Node **parame
 }
 
 static CtType type_name_of(Parser *parser) {
-    int is_static = 0, is_const = 0;
-    CtType base = type_specifier(parser, &is_static, &is_const, NULL);
+    int storage = 0, is_const = 0;
+    CtType base = type_specifier(parser, &storage, &is_const, NULL);
     Token name;
     CtType type = declarator(parser, base, &name, NULL, NULL);
     if (name.length) fail(parser, "a type name cannot declare a variable");
@@ -412,9 +484,10 @@ static CtType type_name_of(Parser *parser) {
 
 static void aggregate_members(Parser *parser, CtType aggregate) {
     while (parser->status == CT_OK && parser->token.kind != '}' && parser->token.kind != TK_EOF) {
-        int is_static = 0, is_const = 0;
-        CtType base = type_specifier(parser, &is_static, &is_const, NULL);
-        if (is_static) { fail(parser, "a member cannot be static"); break; }
+        if (parser->token.kind == TK_STATIC_ASSERT) { (void)static_assertion(parser); continue; }
+        int storage = 0, is_const = 0;
+        CtType base = type_specifier(parser, &storage, &is_const, NULL);
+        if (storage == TK_STATIC) { fail(parser, "a member cannot be static"); break; }
         do {
             Token name;
             CtType type = declarator(parser, base, &name, NULL, NULL);
@@ -536,14 +609,14 @@ static CtType basic_type(Parser *parser, const Specifiers *seen) {
     return seen->sign < 0 ? (CtType)(type + 1) : type;
 }
 
-static CtType type_specifier(Parser *parser, int *is_static, int *is_const, Node ***tail) {
+static CtType type_specifier(Parser *parser, int *storage, int *is_const, Node ***tail) {
     Specifiers seen = {0};
     CtType named = -1;
     int count = 0;
     while (parser->status == CT_OK) {
         int kind = parser->token.kind;
         if (is_storage(kind)) {
-            if (kind == TK_STATIC) *is_static = 1;
+            if (kind == TK_STATIC || kind == TK_EXTERN) *storage = kind;
             next(parser);
             continue;
         }
@@ -644,7 +717,7 @@ static Node *primary(Parser *parser) {
             if (result) { result->type = type; result->left = expression(parser, 13); }
             return result;
         }
-        Node *result = expression(parser, 1);
+        Node *result = comma_expression(parser);
         expect(parser, ')', "expected ')'");
         return result;
     }
@@ -715,7 +788,7 @@ static Node *postfix(Parser *parser) {
             next(parser);
             if (!index) break;
             index->left = left;
-            index->right = expression(parser, 1);
+            index->right = comma_expression(parser);
             expect(parser, ']', "expected ']' after a subscript");
             left = index;
         } else if (kind == '.' || kind == TK_ARROW) {
@@ -757,7 +830,7 @@ static Node *expression(Parser *parser, int minimum) {
         if (!result) break;
         result->left = left;
         if (operator.kind == '?') {
-            result->right = expression(parser, 1);
+            result->right = comma_expression(parser);
             expect(parser, ':', "expected ':' in a conditional expression");
             result->third = expression(parser, 2);
         } else {
@@ -773,6 +846,44 @@ static Node *expression(Parser *parser, int minimum) {
     }
     --parser->depth;
     return left;
+}
+
+/* Checked while parsing and leaves nothing to execute. */
+/* C's full expression: assignment expressions joined by the comma operator. */
+static Node *comma_expression(Parser *parser) {
+    Node *left = expression(parser, 1);
+    while (parser->status == CT_OK && left && parser->token.kind == ',') {
+        Node *result = node(parser, N_COMMA, parser->token);
+        next(parser);
+        if (!result) break;
+        result->left = left;
+        result->right = expression(parser, 1);
+        left = result;
+    }
+    return left;
+}
+
+static Node *static_assertion(Parser *parser) {
+    Token keyword = parser->token;
+    next(parser);
+    expect(parser, '(', "expected '(' after _Static_assert");
+    Node *condition = expression(parser, 1);
+    expect(parser, ',', "expected ',' after the static assertion condition");
+    Node *message = parser->token.kind == TK_STRING ? primary(parser) : NULL;
+    if (!message) fail(parser, "expected a string literal message in _Static_assert");
+    expect(parser, ')', "expected ')' after the static assertion message");
+    expect(parser, ';', "expected ';' after the static assertion");
+    if (parser->status != CT_OK) return NULL;
+    int64_t value = 0;
+    char text[sizeof parser->error->message];
+    if (!constant_value(parser, condition, &value))
+        (void)snprintf(text, sizeof text, "static assertion requires an integer constant expression");
+    else if (!value)
+        (void)snprintf(text, sizeof text, "static assertion failed: %s", message->text ? message->text : "");
+    else return node(parser, N_EMPTY, keyword);
+    fail_at(parser, keyword, text);
+    parser->status = CT_ERROR;
+    return NULL;
 }
 
 static Node *designated_item(Parser *parser) {
@@ -836,11 +947,11 @@ static size_t initializer_extent(Parser *parser, Node *list) {
 
 static Node *declaration(Parser *parser, int top_level) {
     int is_typedef = accept(parser, TK_TYPEDEF);
-    int is_static = 0, is_const = 0;
+    int storage = 0, is_const = 0;
     Node *group = node(parser, N_GROUP, parser->token);
     if (!group) return NULL;
     Node **tail = &group->left;
-    CtType base = type_specifier(parser, &is_static, &is_const, &tail);
+    CtType base = type_specifier(parser, &storage, &is_const, &tail);
     if (parser->status != CT_OK) return group;
     if (!is_typedef && accept(parser, ';')) return group;
     do {
@@ -875,6 +986,7 @@ static Node *declaration(Parser *parser, int top_level) {
                 CtType enclosing = parser->function_type;
                 parser->function_type = type_target(type);
                 ++parser->scope;
+                for (Node *parameter = parameters; parameter; parameter = parameter->next) declare_object(parser, parameter);
                 function->right = statement(parser, 0);
                 --parser->scope;
                 pop_aliases(parser);
@@ -887,7 +999,8 @@ static Node *declaration(Parser *parser, int top_level) {
         Node *result = node(parser, N_DECLARATION, name);
         if (!result) return group;
         result->type = type;
-        result->is_static = is_static;
+        result->is_static = storage == TK_STATIC;
+        result->is_extern = storage == TK_EXTERN;
         result->is_const = is_const && !type_is_pointer(type);
         *tail = result;
         tail = &result->next;
@@ -906,6 +1019,7 @@ static Node *declaration(Parser *parser, int top_level) {
             fail(parser, "a variable requires a complete object type");
             return group;
         }
+        declare_object(parser, result);
     } while (accept(parser, ','));
     expect(parser, ';', "expected ';' after the declaration");
     return group;
@@ -913,6 +1027,7 @@ static Node *declaration(Parser *parser, int top_level) {
 
 static Node *statement_inner(Parser *parser, int top_level) {
     Token token = parser->token;
+    if (token.kind == TK_STATIC_ASSERT) return static_assertion(parser);
     if (begins_type(parser, token)) return declaration(parser, top_level);
     if (token.kind == '{') {
         next(parser);
@@ -934,7 +1049,7 @@ static Node *statement_inner(Parser *parser, int top_level) {
         Node *result = node(parser, N_IF, token);
         if (!result) return NULL;
         expect(parser, '(', "expected '(' after if");
-        result->left = expression(parser, 1);
+        result->left = comma_expression(parser);
         expect(parser, ')', "expected ')' after the condition");
         result->right = statement(parser, 0);
         if (accept(parser, TK_ELSE)) result->third = statement(parser, 0);
@@ -948,7 +1063,7 @@ static Node *statement_inner(Parser *parser, int top_level) {
         --parser->loops;
         expect(parser, TK_WHILE, "expected while after the do body");
         expect(parser, '(', "expected '(' after while");
-        result->left = expression(parser, 1);
+        result->left = comma_expression(parser);
         expect(parser, ')', "expected ')' after the condition");
         expect(parser, ';', "expected ';' after do-while");
         return result;
@@ -957,7 +1072,7 @@ static Node *statement_inner(Parser *parser, int top_level) {
         Node *result = node(parser, N_SWITCH, token);
         if (!result) return NULL;
         expect(parser, '(', "expected '(' after switch");
-        result->left = expression(parser, 1);
+        result->left = comma_expression(parser);
         expect(parser, ')', "expected ')' after the switch expression");
         if (parser->token.kind != '{') fail(parser, "switch requires a block");
         ++parser->switches;
@@ -986,14 +1101,14 @@ static Node *statement_inner(Parser *parser, int top_level) {
             else {
                 if (parser->token.kind != ';') {
                     result->left = node(parser, N_EXPRESSION, parser->token);
-                    if (result->left) result->left->left = expression(parser, 1);
+                    if (result->left) result->left->left = comma_expression(parser);
                 }
                 expect(parser, ';', "expected ';' after the for initializer");
             }
-            if (parser->token.kind != ';') result->right = expression(parser, 1);
+            if (parser->token.kind != ';') result->right = comma_expression(parser);
             expect(parser, ';', "expected ';' after the for condition");
-            if (parser->token.kind != ')') result->third = expression(parser, 1);
-        } else result->left = expression(parser, 1);
+            if (parser->token.kind != ')') result->third = comma_expression(parser);
+        } else result->left = comma_expression(parser);
         expect(parser, ')', "expected ')' after the loop header");
         ++parser->loops;
         if (token.kind == TK_FOR) result->fourth = statement(parser, 0);
@@ -1033,7 +1148,7 @@ static Node *statement_inner(Parser *parser, int top_level) {
         if (kind == N_RETURN) {
             if (parser->function_type == CT_VOID && parser->token.kind != ';') fail(parser, "a void function cannot return a value");
             if (parser->function_type != CT_VOID && parser->token.kind == ';') fail(parser, "a non-void function must return a value");
-            if (parser->token.kind != ';') result->left = expression(parser, 1);
+            if (parser->token.kind != ';') result->left = comma_expression(parser);
         }
         expect(parser, ';', "expected ';' after the statement");
         return result;
@@ -1041,7 +1156,7 @@ static Node *statement_inner(Parser *parser, int top_level) {
     if (accept(parser, ';')) return node(parser, N_EMPTY, token);
     Node *result = node(parser, N_EXPRESSION, token);
     if (!result) return NULL;
-    result->left = expression(parser, 1);
+    result->left = comma_expression(parser);
     result->terminated = parser->token.kind == ';';
     if (!(top_level && parser->token.kind == TK_EOF))
         expect(parser, ';', "expected ';' after the expression");
@@ -1096,13 +1211,8 @@ CtStatus parse_with_context(const char *source, const Unit *previous, Unit **uni
         if (!*tail) break;
         tail = &(*tail)->next;
     }
-    parser.scope = 0;
-    pop_aliases(&parser);
-    while (parser.aliases) {
-        Alias *dead = parser.aliases;
-        parser.aliases = dead->next;
-        free(dead);
-    }
+    free_aliases(parser.aliases);
+    free_aliases(parser.objects);
     if (parser.status != CT_OK) unit_destroy(result);
     else *unit = result;
     return parser.status;
@@ -1119,7 +1229,7 @@ static void dump_node(FILE *output, const Node *node, unsigned depth) {
         "continue", "function", "empty", "string", "index", "cast", "sizeof", "alignof",
         "declarations", "initializer", "do", "switch", "case", "goto", "label", "typedef",
         "enumerator", "generic", "association", "member", "compound", "designated", "designator",
-        "va_start", "va_arg", "va_end", "va_copy"
+        "va_start", "va_arg", "va_end", "va_copy", "comma"
     };
     for (; node; node = node->next) {
         fprintf(output, "%*s%s", (int)(depth * 2), "", names[node->kind]);

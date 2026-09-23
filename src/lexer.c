@@ -54,7 +54,8 @@ static int keyword_kind(const char *text, size_t length) {
 #define KEYWORD(word, kind) \
     do { if (length == sizeof(word) - 1 && !memcmp(text, word, sizeof(word) - 1)) return kind; } while (0)
     switch (*text) {
-        case '_': KEYWORD("_Alignof", TK_ALIGNOF); KEYWORD("_Bool", TK_BOOL); KEYWORD("_Generic", TK_GENERIC); break;
+        case '_': KEYWORD("_Alignof", TK_ALIGNOF); KEYWORD("_Bool", TK_BOOL); KEYWORD("_Generic", TK_GENERIC);
+                  KEYWORD("_Static_assert", TK_STATIC_ASSERT); break;
         case 'a': KEYWORD("auto", TK_AUTO); break;
         case 'b': KEYWORD("break", TK_BREAK); break;
         case 'c': KEYWORD("case", TK_CASE); KEYWORD("char", TK_CHAR); KEYWORD("const", TK_CONST); KEYWORD("continue", TK_CONTINUE); break;
@@ -75,6 +76,40 @@ static int keyword_kind(const char *text, size_t length) {
     }
 #undef KEYWORD
     return TK_NAME;
+}
+
+static int operator_kind(const char *text, size_t *length) {
+    char second = text[1], third = second ? text[2] : '\0';
+    *length = 2;
+    switch (text[0]) {
+        case '<':
+            if (second == '<') {
+                if (third == '=') { *length = 3; return TK_SHL_ASSIGN; }
+                return TK_SHL;
+            }
+            return second == '=' ? TK_LE : 0;
+        case '>':
+            if (second == '>') {
+                if (third == '=') { *length = 3; return TK_SHR_ASSIGN; }
+                return TK_SHR;
+            }
+            return second == '=' ? TK_GE : 0;
+        case '.':
+            if (second != '.' || third != '.') return 0;
+            *length = 3;
+            return TK_ELLIPSIS;
+        case '+': return second == '+' ? TK_INCREMENT : second == '=' ? TK_ADD_ASSIGN : 0;
+        case '-': return second == '-' ? TK_DECREMENT : second == '>' ? TK_ARROW : second == '=' ? TK_SUB_ASSIGN : 0;
+        case '&': return second == '&' ? TK_AND : second == '=' ? TK_AND_ASSIGN : 0;
+        case '|': return second == '|' ? TK_OR : second == '=' ? TK_OR_ASSIGN : 0;
+        case '=': return second == '=' ? TK_EQ : 0;
+        case '!': return second == '=' ? TK_NE : 0;
+        case '*': return second == '=' ? TK_MUL_ASSIGN : 0;
+        case '/': return second == '=' ? TK_DIV_ASSIGN : 0;
+        case '%': return second == '=' ? TK_MOD_ASSIGN : 0;
+        case '^': return second == '=' ? TK_XOR_ASSIGN : 0;
+        default: return 0;
+    }
 }
 
 Token lexer_next(Lexer *lexer) {
@@ -172,23 +207,13 @@ Token lexer_next(Lexer *lexer) {
         }
         return token;
     }
-    static const struct { const char *text; int kind; } operators[] = {
-        {"<<=", TK_SHL_ASSIGN}, {">>=", TK_SHR_ASSIGN}, {"...", TK_ELLIPSIS},
-        {"++", TK_INCREMENT}, {"--", TK_DECREMENT}, {"->", TK_ARROW},
-        {"==", TK_EQ}, {"!=", TK_NE}, {"<=", TK_LE}, {">=", TK_GE},
-        {"&&", TK_AND}, {"||", TK_OR}, {"<<", TK_SHL}, {">>", TK_SHR},
-        {"+=", TK_ADD_ASSIGN}, {"-=", TK_SUB_ASSIGN}, {"*=", TK_MUL_ASSIGN},
-        {"/=", TK_DIV_ASSIGN}, {"%=", TK_MOD_ASSIGN}, {"&=", TK_AND_ASSIGN},
-        {"|=", TK_OR_ASSIGN}, {"^=", TK_XOR_ASSIGN}
-    };
-    for (size_t i = 0; i < sizeof operators / sizeof operators[0]; ++i) {
-        size_t length = strlen(operators[i].text);
-        if (!strncmp(lexer->cursor, operators[i].text, length)) {
-            token.kind = operators[i].kind;
-            token.length = length;
-            for (size_t j = 0; j < length; ++j) advance(lexer);
-            return token;
-        }
+    size_t length = 0;
+    int kind = operator_kind(lexer->cursor, &length);
+    if (kind) {
+        token.kind = kind;
+        token.length = length;
+        for (size_t j = 0; j < length; ++j) advance(lexer);
+        return token;
     }
     advance(lexer);
     token.length = 1;

@@ -106,7 +106,7 @@ Files and piped source run `main` automatically when it exists. Both `int main(v
 ./build/Cterpreter -e 'interpret("examples/basics/hello.c");'
 ```
 
-This is nesting, not self-interpretation: Cterpreter cannot yet run its own source.
+This is nesting, not self-interpretation. Cterpreter can parse and load every file of its own interpreter core, but it cannot yet run itself: the command-line front end needs POSIX headers, and there is no way to link several source files into one program.
 
 ## Implemented language and runtime
 
@@ -114,10 +114,12 @@ This is nesting, not self-interpretation: Cterpreter cannot yet run its own sour
 - Integer promotions and the usual arithmetic conversions. Unsigned arithmetic wraps; signed overflow is refused rather than wrapped. Literals take their type from their value and their `u`/`l` suffixes.
 - Pointers, multidimensional arrays, structures, unions, enumerations, function types, and function pointers, with member access through `.` and `->`, indirect calls, and C's layout and alignment rules.
 - Full declarator syntax, including arrays of pointers, pointers to arrays, and pointers to functions, plus `typedef`, `const`, `volatile`, `restrict`, `extern`, `register`, `inline`, and `auto`. Tags and typedefs may be declared at block scope.
+- Repeated file-scope declarations of one object, such as `extern int x;` followed by `int x = 1;`, as long as the types agree and at most one initializes it. A block-scope `extern` declaration refers to the file-scope object.
+- `_Static_assert` at file scope, block scope, and in structure members, and `static_assert` from `assert.h`.
 - Initializer lists with brace elision, designated initializers for members and array elements, string initialization, and compound literals.
 - Aggregate assignment, aggregate arguments, and aggregate return values, all copied by value.
-- Casts, `sizeof` (yielding `size_t`), `_Alignof`, `_Generic`, and `offsetof`.
-- Arithmetic, comparison, logical, bitwise, shift, assignment, increment/decrement, and conditional operators.
+- Casts, `sizeof` (yielding `size_t`), `_Alignof`, `_Generic`, and `offsetof`. In constant expressions such as array bounds, `sizeof` also folds for objects declared earlier in the same source, as in `sizeof table / sizeof table[0]`.
+- Arithmetic, comparison, logical, bitwise, shift, assignment, increment/decrement, conditional, and comma operators.
 - Lexical scopes, globals, static locals, `const` objects, and multiple declarators per declaration.
 - Function definitions, prototypes, recursion, and void functions.
 - Variadic interpreted functions with default argument promotions, `stdarg.h`, `va_start`, `va_arg`, `va_copy`, and `va_end`. Lists can be passed to helpers or copied for independent traversal; invalid types, exhausted lists, and use after the owning call returns are diagnosed.
@@ -127,7 +129,7 @@ This is nesting, not self-interpretation: Cterpreter cannot yet run its own sour
 - `#include`, `#define`, `#undef`, conditional directives, function-like/variadic macros, stringification, token concatenation, `#pragma once`, `#line`, and `#error`.
 - The predefined macros `__FILE__`, `__LINE__`, `__DATE__`, `__TIME__`, `__COUNTER__`, `__STDC__`, `__STDC_VERSION__`, `__STDC_HOSTED__`, the `__STDC_NO_*` feature macros, `__CTERPRETER__`, and `__CTERPRETER_VERSION__`.
 
-Quoted headers resolve relative to the source file. Supported standard includes are `stdio.h`, `stdlib.h`, `string.h`, `stdarg.h`, `math.h`, `ctype.h`, `stddef.h`, `stdint.h`, `stdbool.h`, `limits.h`, `float.h`, `time.h`, `errno.h`, `assert.h`, and `iso646.h`; they expose the implemented runtime subset with the host's real limits, not the host system headers. Include guards and `#pragma once` both work. Macro expansion remains a subset of the C17 preprocessing rules.
+Quoted headers resolve relative to the source file. Supported standard includes are `stdio.h`, `stdlib.h`, `string.h`, `stdarg.h`, `math.h`, `ctype.h`, `stddef.h`, `stdint.h`, `inttypes.h`, `stdbool.h`, `limits.h`, `float.h`, `time.h`, `errno.h`, `assert.h`, `signal.h` (types and signal numbers only), and `iso646.h`; they expose the implemented runtime subset with the host's real limits, not the host system headers. Include guards and `#pragma once` both work. Macro expansion remains a subset of the C17 preprocessing rules.
 
 The runtime includes:
 
@@ -146,7 +148,7 @@ The runtime includes:
 
 ## Current limits
 
-This is not a conforming C17 implementation. Remaining work includes bit-fields, `long double`, complex numbers, atomics, variable-length arrays, arbitrary jumps into nested blocks, and self-interpretation. `volatile` and `restrict` are accepted and ignored; `extern` declares rather than references. Array bounds must be integer constant expressions the parser can fold. Pointer values use a virtual 64-bit address representation, not host addresses, so casting a pointer to an integer yields that virtual address.
+This is not a conforming C17 implementation. Remaining work includes bit-fields, `long double`, complex numbers, atomics, variable-length arrays, arbitrary jumps into nested blocks, and self-interpretation. `volatile` and `restrict` are accepted and ignored. Array bounds must be integer constant expressions the parser can fold. Pointer values use a virtual 64-bit address representation, not host addresses, so casting a pointer to an integer yields that virtual address.
 
 Semantic checking largely happens during execution. Operand/argument evaluation proceeds left to right, and unsequenced side effects are not diagnosed. Some invalid constructs in unexecuted branches can therefore escape checking. Switch labels belong directly to the switch block. Diagnostics after expanded includes can refer to the expanded source line rather than the original header line.
 

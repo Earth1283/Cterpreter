@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <float.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -265,8 +266,14 @@ static void expand(Expansion *expansion, const char *source, Text *result, Macro
             continue;
         }
         if (!isalpha((unsigned char)*cursor) && *cursor != '_') {
-            if (*cursor == '\n' && !depth) ++expansion->line;
-            emit(expansion, result, cursor++, 1);
+            const char *end = cursor;
+            do {
+                if (*end == '\n' && !depth) ++expansion->line;
+                ++end;
+            } while (*end && *end != '"' && *end != '\'' && !identifier(*end) &&
+                     !(*end == '.' && isdigit((unsigned char)end[1])));
+            emit(expansion, result, cursor, (size_t)(end - cursor));
+            cursor = end;
             continue;
         }
         const char *end = name_end(cursor);
@@ -520,10 +527,12 @@ static char *header_definitions(const char *header) {
                      "#define compl ~\n#define not !\n#define not_eq !=\n#define or ||\n"
                      "#define or_eq |=\n#define xor ^\n#define xor_eq ^=\n"},
         {"assert.h", "#undef assert\n#ifdef NDEBUG\n#define assert(e) ((void)0)\n#else\n"
-                     "#define assert(e) ((e) || __assert_fail(#e, __FILE__, __LINE__))\n#endif\n"},
-        {"limits.h", NULL}, {"float.h", NULL}, {"time.h", NULL}, {"errno.h", NULL}, {"stdint.h", NULL}
+                     "#define assert(e) ((e) || __assert_fail(#e, __FILE__, __LINE__))\n#endif\n"
+                     "#define static_assert _Static_assert\n"},
+        {"limits.h", NULL}, {"float.h", NULL}, {"time.h", NULL}, {"errno.h", NULL}, {"stdint.h", NULL},
+        {"inttypes.h", NULL}, {"signal.h", NULL}
     };
-    char generated[768] = "";
+    char generated[2048] = "";
     if (!strcmp(header, "limits.h"))
         (void)snprintf(generated, sizeof generated,
                        "#define CHAR_BIT %d\n#define SCHAR_MIN (-%d - 1)\n#define SCHAR_MAX %d\n"
@@ -557,11 +566,35 @@ static char *header_definitions(const char *header) {
                        "#define int64_t long\n#define uint64_t unsigned long\n"
                        "#define intptr_t long\n#define uintptr_t unsigned long\n"
                        "#define intmax_t long long\n#define uintmax_t unsigned long long\n"
+                       "#define INT8_MIN (-%d - 1)\n#define INT16_MIN (-%d - 1)\n#define INT32_MIN (-%d - 1)\n"
+                       "#define INT64_MIN (-%lldLL - 1)\n#define INTMAX_MIN INT64_MIN\n"
                        "#define INT8_MAX %d\n#define INT16_MAX %d\n#define INT32_MAX %d\n"
                        "#define INT64_MAX %lldLL\n#define UINT8_MAX %d\n#define UINT16_MAX %d\n"
-                       "#define UINT32_MAX %uU\n#define UINT64_MAX %lluULL\n#define SIZE_MAX %luUL\n",
+                       "#define UINT32_MAX %uU\n#define UINT64_MAX %lluULL\n#define SIZE_MAX %luUL\n"
+                       "#define INTMAX_MAX INT64_MAX\n#define UINTMAX_MAX UINT64_MAX\n"
+                       "#define INTPTR_MIN (-%ldL - 1)\n#define INTPTR_MAX %ldL\n#define UINTPTR_MAX %luUL\n"
+                       "#define INT8_C(value) value\n#define INT16_C(value) value\n#define INT32_C(value) value\n"
+                       "#define INT64_C(value) value ## L\n#define INTMAX_C(value) value ## LL\n"
+                       "#define UINT8_C(value) value\n#define UINT16_C(value) value\n#define UINT32_C(value) value ## U\n"
+                       "#define UINT64_C(value) value ## UL\n#define UINTMAX_C(value) value ## ULL\n",
+                       SCHAR_MAX, SHRT_MAX, INT_MAX, LLONG_MAX,
                        SCHAR_MAX, SHRT_MAX, INT_MAX, LLONG_MAX, UCHAR_MAX, USHRT_MAX,
-                       UINT_MAX, ULLONG_MAX, ULONG_MAX);
+                       UINT_MAX, ULLONG_MAX, ULONG_MAX, LONG_MAX, LONG_MAX, ULONG_MAX);
+    else if (!strcmp(header, "inttypes.h")) {
+        static const struct { const char *width, *length; } widths[] = {
+            {"8", ""}, {"16", ""}, {"32", ""}, {"64", "l"}, {"MAX", "ll"}, {"PTR", "l"}
+        };
+        size_t used = (size_t)snprintf(generated, sizeof generated, "#include <stdint.h>\n");
+        for (size_t i = 0; i < sizeof widths / sizeof widths[0]; ++i)
+            for (const char *conversion = "diouxX"; *conversion; ++conversion)
+                used += (size_t)snprintf(generated + used, sizeof generated - used, "#define PRI%c%s \"%s%c\"\n",
+                                         *conversion, widths[i].width, widths[i].length, *conversion);
+    } else if (!strcmp(header, "signal.h"))
+        (void)snprintf(generated, sizeof generated,
+                       "#ifndef __CT_SIGNAL_H\n#define __CT_SIGNAL_H\ntypedef int sig_atomic_t;\n#endif\n"
+                       "#define SIGABRT %d\n#define SIGFPE %d\n#define SIGILL %d\n#define SIGINT %d\n"
+                       "#define SIGSEGV %d\n#define SIGTERM %d\n",
+                       SIGABRT, SIGFPE, SIGILL, SIGINT, SIGSEGV, SIGTERM);
     else if (!strcmp(header, "errno.h"))
         (void)snprintf(generated, sizeof generated,
                        "#define EDOM %d\n#define ERANGE %d\n#define EILSEQ %d\n#define ENOENT %d\n"
@@ -596,8 +629,12 @@ static void include(Expansion *expansion, const char *source, Text *output, unsi
         (void)process(expansion, definitions, &declarations, depth + 1);
         /* Most built-in headers contain only macros. Preserve real declarations
          * too (stdarg.h supplies va_list), without adding macro-only blank lines. */
-        if (declarations.data && strspn(declarations.data, " \t\r\n") < declarations.length)
+        if (declarations.data && strspn(declarations.data, " \t\r\n") < declarations.length) {
+            /* On one line, so that the includer's line numbers stay true. */
+            for (char *newline = strchr(declarations.data, '\n'); newline; newline = strchr(newline, '\n'))
+                *newline = ' ';
             emit(expansion, output, declarations.data, declarations.length);
+        }
         free(declarations.data);
         free(definitions);
         expansion->line = line;
