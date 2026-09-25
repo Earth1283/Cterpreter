@@ -1,6 +1,6 @@
 # Examples
 
-31 programs, grouped by their main feature. Many deliberately combine several features; the table below lists those connections. Run commands from the repository root after building Cterpreter.
+37 programs, grouped by their main feature. Many deliberately combine several features; the table below lists those connections. Run commands from the repository root after building Cterpreter.
 
 ```sh
 ./build/Cterpreter examples/basics/hello.c Ada
@@ -16,7 +16,7 @@
 ./build/Cterpreter --max-steps 900000000 examples/playground/donut.c
 ```
 
-For the more involved programs, start with merge sort, N-Queens, the growing vector, shortest paths, or the stack machine. For the type system, start with the aggregate, function-pointer, and numeric-type programs. For something to play with rather than read, go to [the playground](#playground).
+For the more involved programs, start with merge sort, N-Queens, the growing vector, shortest paths, or the stack machine. For the type system, start with the aggregate, function-pointer, and numeric-type programs. For something to play with rather than read, go to [the playground](#playground). For something that should not exist, go to [unhinged](#unhinged).
 
 ## Program index
 
@@ -50,6 +50,12 @@ For the more involved programs, start with merge sort, N-Queens, the growing vec
 | [playground/maze.c](playground/maze.c) | Recursive backtracking, an explicit direction shuffle, recursive DFS solving | A carved maze, then the same maze with its route marked in dots |
 | [playground/adventure.c](playground/adventure.c) | Structures, function-pointer verb dispatch, `strtok`, `fgets`, game state | A small text adventure set inside a C interpreter |
 | [playground/toolkit.c](playground/toolkit.c) | A dozen callable curiosities meant for `.load` rather than for running | Prints a menu of things to call from the REPL |
+| [unhinged/quine.c](unhinged/quine.c) | Escaping, string tables, self-reference | Its own source, byte for byte |
+| [unhinged/inception.c](unhinged/inception.c) | `interpret()`, `interpret_depth()`, exit statuses, `__CTERPRETER__` | `5! = 120`, computed six interpreters deep |
+| [unhinged/forth.c](unhinged/forth.c) | A Forth compiler and threaded-code VM: a dictionary, control-flow patching, return stacks | Factorials, primes, FizzBuzz, and a triangle of stars, all in Forth |
+| [unhinged/lisp.c](unhinged/lisp.c) | A Lisp with closures: a reader, a cell pool, interned symbols, `eval`/`apply` | Maps, a prime sieve, and `10!` through the Y combinator |
+| [unhinged/ski.c](unhinged/ski.c) | Graph reduction of S, K, and I combinators, Church numerals, in-place redex updates | `(3 * 3) ^ 2 = 81` with no numbers until the end |
+| [unhinged/pointer_chase.c](unhinged/pointer_chase.c) | A shuffled chain of `void *` rooms, pointer subtraction, a 46-level pointer type | The route through 45 rooms, then `46 stars later: 42` |
 
 The graph is stored in one flat array using `row * NODES + column`, and the vector uses separate pointer, length, and capacity variables; both predate aggregate support and still run unchanged. The `types` programs use structures and multidimensional arrays directly.
 
@@ -120,6 +126,21 @@ c> ackermann(3, 6)
 
 Loading it prints the menu and leaves every function defined in the session, so you can call them with your own arguments, redefine them, or build on them. `ackermann(3, 6)` is included because it is the fastest way to meet the step limit on purpose.
 
+## Unhinged
+
+Programs that are here because they could be, not because they should be. Each runs with the default limits.
+
+```sh
+./build/Cterpreter examples/unhinged/quine.c | diff - examples/unhinged/quine.c
+./build/Cterpreter examples/unhinged/inception.c
+./build/Cterpreter examples/unhinged/forth.c
+./build/Cterpreter examples/unhinged/lisp.c
+./build/Cterpreter examples/unhinged/ski.c
+./build/Cterpreter examples/unhinged/pointer_chase.c
+```
+
+The quine prints its own source; the `diff` above prints nothing. Inception computes a factorial by running itself: each level starts the same file in a nested interpreter and gets the smaller factorial back as that program's exit status. Compiled natively, it has nowhere to go and says so. The Forth and the Lisp are complete little languages, each running a program of its own, and all of it happens inside Cterpreter. The SKI program does arithmetic with three combinators and no numbers, and only turns its Church numerals into digits to print them. The pointer chase threads 45 shuffled rooms into one chain, walks it with a loop, and then reaches the treasure the other way: with `**********************************************px`.
+
 ## Intentional diagnostics
 
 These three programs are expected to fail with exit status 1. They demonstrate Cterpreter diagnostics, so they are excluded from comparisons with native execution.
@@ -136,8 +157,8 @@ These three programs are expected to fail with exit status 1. They demonstrate C
 
 ## Verification
 
-27 of the successful programs were compiled as C17 with GCC on Linux and their stdout, stderr, and exit statuses compared against Cterpreter using the documented sample inputs. All matched byte for byte, the donut included, which pins several thousand floating-point results at once. The three diagnostic examples produced their expected errors. The comparison runs as the `reference_programs` CTest check, so it is repeated on every test run.
+31 of the successful programs were compiled as C17 with GCC on Linux and their stdout, stderr, and exit statuses compared against Cterpreter using the documented sample inputs. All matched byte for byte, the donut included, which pins several thousand floating-point results at once. The three diagnostic examples produced their expected errors. The comparison runs as the `reference_programs` CTest check, so it is repeated on every test run.
 
-The maze and Life's random soup are excluded from that comparison. `rand()` is Cterpreter's own generator, kept per interpreter instance so that nested instances stay independent, so a seeded run is reproducible in Cterpreter but does not match the host's sequence.
+The maze and Life's random soup are excluded from that comparison, and so is inception, which only runs its computation under Cterpreter. `rand()` is Cterpreter's own generator, kept per interpreter instance so that nested instances stay independent, so a seeded run is reproducible in Cterpreter but does not match the host's sequence.
 
 These examples demonstrate supported behavior; they do not establish full C17 conformance.

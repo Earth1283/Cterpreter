@@ -1,5 +1,16 @@
 # Misendeavor log
 
+## 2026-09-25 — 0.4.0: a pass before execution
+
+Profiling 0.3.1 showed the time spread thinly across generic machinery rather than concentrated anywhere. Every node went through the same switch, every operator dispatched on its operand types, and names were resolved again whenever a loop body opened a new scope. A trivial `for` loop cost about 1,570 host instructions per iteration. 0.4.0 adds a pass that runs over each submission after parsing and before execution, and uses what it learns to pick a specialized evaluator for each node. The benchmark set went from 3.35 s to 1.20 s, **2.8× faster**, with 2.63× fewer instructions.
+
+- Constants are folded by the evaluator itself, and a fold that would fail is left for run time, so every diagnostic keeps its timing and position. Branches on constant conditions, unreachable statements, and empty statements are removed.
+- Names inside functions are bound to their declarations before execution, and names a function never declares go straight to the globals. Functions whose jumps could make the binding differ from run-time lookup keep the old path.
+- Scalar locals whose address is never taken live in their symbols, outside the managed address space. Blocks that need no scope don't get one.
+- Every expression and statement node gets a handler chosen for its shape. Each handler falls back to the general evaluator, before doing anything observable, when its assumptions don't hold.
+
+Two bugs turned up along the way. The new pass folded `1 && x` by evaluating `x` before execution; a generated test program found it, and it was fixed before release. An older one made `c ? x[0] : 2` with a non-pointer `x` recurse without bound while typing the expression; it now reports "dereference requires a pointer". Steps and depth still bound runaway programs and the host stack, but a program now uses fewer steps, and a deep recursion may hit the depth limit at a different point.
+
 ## 2026-09-23 — 0.3.1: interpreter performance
 
 Profiling with callgrind showed the time going to bookkeeping rather than to the programs: every local variable cost two host allocations, every name use rehashed its text and walked the scope chain, builtins were dispatched by comparing name strings, and `qsort` was a shell sort that called the interpreted comparator O(n^1.5) times. Measured as best of five runs against the previous commit, the benchmark set (ten micro-benchmarks plus the playground) went from 10.6 s to 3.9 s, **2.7× faster** overall: the donut 6.6 s → 2.4 s, Life 1.9 s → 0.76 s, recursive `fib(25)` 2.5×, and a 20,000-element `qsort` 4.6×. All diagnostics, strict-mode behaviour, and example outputs are unchanged.

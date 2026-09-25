@@ -57,7 +57,8 @@ static Allocation *new_record(Memory *memory) {
     Allocation *allocation = memory->spares;
     if (allocation) memory->spares = allocation->next_spare;
     else if (!(allocation = malloc(sizeof *allocation))) return NULL;
-    memset(allocation, 0, sizeof *allocation);
+    allocation->readonly = 0;
+    allocation->next_spare = NULL;
     return allocation;
 }
 
@@ -67,15 +68,16 @@ static void recycle_record(Memory *memory, Allocation *allocation) {
     memory->spares = allocation;
 }
 
-uint64_t memory_allocate(Memory *memory, size_t size, int zero, int heap) {
+Allocation *memory_allocate_record(Memory *memory, size_t size, int zero, int heap) {
     memory->error = NULL;
     if (size > 64u * 1024u * 1024u || memory->bytes > 64u * 1024u * 1024u - size) {
         memory->error = "interpreter memory limit exceeded";
-        return 0;
+        return NULL;
     }
     Allocation *allocation = new_record(memory);
-    if (!allocation) { memory->error = "out of memory"; return 0; }
+    if (!allocation) { memory->error = "out of memory"; return NULL; }
     if (size <= ALLOCATION_INLINE_BYTES) {
+        memset(allocation->storage, 0, sizeof allocation->storage);
         allocation->data = allocation->storage;
         allocation->initialized = allocation->storage + ALLOCATION_INLINE_BYTES;
     } else {
@@ -89,18 +91,23 @@ uint64_t memory_allocate(Memory *memory, size_t size, int zero, int heap) {
     if (!allocation->data || !remember(memory, allocation)) {
         recycle_record(memory, allocation);
         memory->error = "out of memory";
-        return 0;
+        return NULL;
     }
-    if (zero) memset(allocation->initialized, 1, size);
     memory->next_address += ((uint64_t)size + 31u) & ~UINT64_C(15);
     allocation->size = size;
     allocation->alive = 1;
     allocation->heap = heap;
     allocation->fully_initialized = zero || !size;
+    allocation->uninitialized = zero ? 0 : size;
     memory->bytes += size;
     memory->find_cache[(allocation->address >> 4) & (MEMORY_FIND_CACHE_SIZE - 1)] = allocation;
     memory->recent = allocation;
-    return allocation->address;
+    return allocation;
+}
+
+uint64_t memory_allocate(Memory *memory, size_t size, int zero, int heap) {
+    Allocation *allocation = memory_allocate_record(memory, size, zero, heap);
+    return allocation ? allocation->address : 0;
 }
 
 /* Addresses are handed out in increasing order and separated by at least
@@ -137,11 +144,15 @@ void *memory_access(Memory *memory, uint64_t address, size_t size, int write) {
             memory->error = "read of uninitialized memory";
             return NULL;
         }
-    } else if (write == 1) {
-        memset(allocation->initialized + offset, 1, size);
-        if (!offset && size == allocation->size) allocation->fully_initialized = 1;
-    }
+    } else if (write == 1) memory_mark(allocation, offset, size);
     return allocation->data + offset;
+}
+
+void memory_recount(Allocation *allocation) {
+    size_t missing = 0;
+    for (size_t i = 0; i < allocation->size; ++i) missing += !allocation->initialized[i];
+    allocation->uninitialized = missing;
+    allocation->fully_initialized = !missing;
 }
 
 int memory_release(Memory *memory, uint64_t address, int heap_only) {
@@ -152,58 +163,18 @@ int memory_release(Memory *memory, uint64_t address, int heap_only) {
     else if (!allocation->alive) memory->error = "object was already freed";
     else if (heap_only && !allocation->heap) memory->error = "free requires a heap allocation";
     if (memory->error) return 0;
+    memory_release_record(memory, allocation);
+    return 1;
+}
+
+void memory_release_record(Memory *memory, Allocation *allocation) {
+    memory->error = NULL;
     if (allocation->data != allocation->storage) free(allocation->data);
     allocation->data = NULL;
     allocation->initialized = NULL;
     allocation->alive = 0;
     ++memory->dead;
     memory->bytes -= allocation->size;
-    return 1;
-}
-
-#define READ_AS(host, field) do { host stored; memcpy(&stored, data, sizeof stored); value.as.field = stored; } while (0)
-#define WRITE_AS(host, field) do { host stored = (host)value.as.field; memcpy(data, &stored, sizeof stored); } while (0)
-
-CtValue memory_decode(const unsigned char *data, CtType type) {
-    CtValue value = {.type = type};
-    switch (type_kind(type)) {
-        case TY_BOOL: READ_AS(_Bool, integer); break;
-        case TY_CHAR: READ_AS(char, integer); break;
-        case TY_SCHAR: READ_AS(signed char, integer); break;
-        case TY_UCHAR: READ_AS(unsigned char, unsigned_integer); break;
-        case TY_SHORT: READ_AS(short, integer); break;
-        case TY_USHORT: READ_AS(unsigned short, unsigned_integer); break;
-        case TY_INT: READ_AS(int, integer); break;
-        case TY_UINT: READ_AS(unsigned, unsigned_integer); break;
-        case TY_LONG: READ_AS(long, integer); break;
-        case TY_ULONG: READ_AS(unsigned long, unsigned_integer); break;
-        case TY_LLONG: READ_AS(long long, integer); break;
-        case TY_ULLONG: READ_AS(unsigned long long, unsigned_integer); break;
-        case TY_FLOAT: READ_AS(float, real); break;
-        case TY_DOUBLE: READ_AS(double, real); break;
-        default: READ_AS(uint64_t, address); break;
-    }
-    return value;
-}
-
-void memory_encode(unsigned char *data, CtValue value) {
-    switch (type_kind(value.type)) {
-        case TY_BOOL: WRITE_AS(_Bool, integer); break;
-        case TY_CHAR: WRITE_AS(char, integer); break;
-        case TY_SCHAR: WRITE_AS(signed char, integer); break;
-        case TY_UCHAR: WRITE_AS(unsigned char, unsigned_integer); break;
-        case TY_SHORT: WRITE_AS(short, integer); break;
-        case TY_USHORT: WRITE_AS(unsigned short, unsigned_integer); break;
-        case TY_INT: WRITE_AS(int, integer); break;
-        case TY_UINT: WRITE_AS(unsigned, unsigned_integer); break;
-        case TY_LONG: WRITE_AS(long, integer); break;
-        case TY_ULONG: WRITE_AS(unsigned long, unsigned_integer); break;
-        case TY_LLONG: WRITE_AS(long long, integer); break;
-        case TY_ULLONG: WRITE_AS(unsigned long long, unsigned_integer); break;
-        case TY_FLOAT: WRITE_AS(float, real); break;
-        case TY_DOUBLE: WRITE_AS(double, real); break;
-        default: WRITE_AS(uint64_t, address); break;
-    }
 }
 
 CtValue memory_read(Memory *memory, uint64_t address, CtType type) {

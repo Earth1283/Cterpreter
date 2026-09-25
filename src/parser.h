@@ -17,6 +17,11 @@ typedef enum {
 /* Tags share a namespace per kind; TAG_NAME covers typedef names. */
 typedef enum { TAG_NAME, TAG_ENUM, TAG_STRUCT, TAG_UNION } TagKind;
 
+/* How the optimizer found an N_NAME resolves: through the scope chain at run
+ * time, through the one local declaration it lexically names, or to a global.
+ * On a declaration, RESOLVE_LOCAL means only such names refer to it. */
+enum { RESOLVE_DYNAMIC, RESOLVE_LOCAL, RESOLVE_GLOBAL };
+
 typedef struct Node Node;
 struct Symbol;
 struct Node {
@@ -31,7 +36,20 @@ struct Node {
     Node *allocated_next;
     Node *alias_next;
     uint64_t hash;
-    int cached;
+    int cached, resolution;
+    /* Declarations: 1 when no pointer can ever reach the object, so it needs no
+     * address; -1 while the optimizer has seen its address taken. */
+    int unaddressed;
+    /* N_CALL: how many evaluations enclose it within its statement, itself included. */
+    int nesting;
+    /* How an operand is read: FETCH_EVALUATE, or in place as one of the others. */
+    int fetch;
+    /* N_BLOCK: declares nothing and cannot create temporaries, so it needs no scope. */
+    int bare;
+    /* The evaluator chosen for this node's shape before execution; NULL means the general one. */
+    CtValue (*run)(CtInterpreter *interpreter, Node *node);
+    /* The same for a statement, returning its control flow. */
+    int (*perform)(CtInterpreter *interpreter, Node *node);
     /* Runtime caches; which member is live depends on the node kind. */
     union {
         /* N_NAME: the last resolution, reused while the innermost scope instance
@@ -50,6 +68,13 @@ struct Node {
         struct {
             Node *head, *label;
         } jump;             /* N_GOTO: the label found in the statement list at head */
+        /* N_INDEX and N_MEMBER: what the last operand type they saw leads to. */
+        struct {
+            CtType source; /* the operand type plus one; zero until one is seen */
+            CtType target, decayed;
+            int shape;
+            size_t size, align;
+        } access;
         CtValue constant;   /* N_CASE: the label value, once N_SWITCH is cached */
         CtType static_type; /* N_CONDITIONAL, once cached */
     } cache;

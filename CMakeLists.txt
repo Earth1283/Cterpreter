@@ -11,7 +11,7 @@ option(CT_FUZZER "Build the fuzz target with libFuzzer instead of the generated 
 option(CT_REPRODUCIBLE "Strip build paths from the output so that builds are reproducible" ON)
 option(CT_REPRODUCIBLE_TEST "Verify reproducibility by building the core library twice" OFF)
 
-add_library(cterpreter_core src/lexer.c src/parser.c src/interpreter.c src/memory.c src/builtins.c src/preprocessor.c src/types.c)
+add_library(cterpreter_core src/lexer.c src/parser.c src/interpreter.c src/memory.c src/builtins.c src/preprocessor.c src/types.c src/optimizer.c)
 target_include_directories(cterpreter_core PUBLIC include PRIVATE src)
 
 add_executable(Cterpreter main.c src/terminal.c src/boot.c src/config.c)

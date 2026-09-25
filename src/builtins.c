@@ -1039,8 +1039,11 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, size_t id,
             Allocation *target = memory_find(&interpreter->memory, address);
             size_t copied = old->size < size ? old->size : size;
             memcpy(target->data, old->data, copied);
-            memcpy(target->initialized, old->initialized, copied);
-            target->fully_initialized = old->fully_initialized && copied == size;
+            if (old->fully_initialized) memory_mark(target, 0, copied);
+            else {
+                memcpy(target->initialized, old->initialized, copied);
+                memory_recount(target);
+            }
             (void)memory_release(&interpreter->memory, old_address, 1);
         }
         return (CtValue){.type = VOID_POINTER, .as.address = address};
@@ -1246,7 +1249,7 @@ search_functions:
         }
         int value = small(interpreter, name, args[0]);
         if (interpreter->failed) return integer(0);
-        if (id == BI_EXIT) { interpreter->exit_requested = 1; interpreter->exit_status = value; return (CtValue){.type = CT_VOID}; }
+        if (id == BI_EXIT) { interpreter->exit_requested = 1; interpreter->tick_boundary = 0; interpreter->exit_status = value; return (CtValue){.type = CT_VOID}; }
         if (id == BI_SRAND) { interpreter->random_state = (unsigned)value; return (CtValue){.type = CT_VOID}; }
         if (value == INT_MIN) return runtime_error(interpreter, name, "abs result overflows int");
         return integer_of(id == BI_LABS ? CT_LONG : CT_INT, abs(value));

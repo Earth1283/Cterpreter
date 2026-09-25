@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define CT_VERSION "0.3.1"
+#define CT_VERSION "0.4.0"
 #define CT_SOURCE_LIMIT (1024u * 1024u)
 
 typedef struct CtInterpreter CtInterpreter;

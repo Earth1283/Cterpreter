@@ -78,6 +78,12 @@ compare examples/playground/brainfuck.c --flags "$big" triangle
 compare examples/playground/toolkit.c --flags "$big"
 compare examples/playground/adventure.c --stdin "$work/adventure.in"
 
+compare examples/unhinged/quine.c
+compare examples/unhinged/forth.c
+compare examples/unhinged/lisp.c
+compare examples/unhinged/ski.c
+compare examples/unhinged/pointer_chase.c
+
 for diagnostic in "$root"/examples/diagnostics/*.c; do
     "$interpreter" "$diagnostic" >/dev/null 2>&1
     if [ $? -ne 1 ]; then

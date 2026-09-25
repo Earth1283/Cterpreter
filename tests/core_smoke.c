@@ -88,6 +88,19 @@ int main(void) {
     check(a, "static const char *words[] = {\"a\", \"b\", \"c\"}; int slots[sizeof words / sizeof words[0]];"
              "(int)(sizeof slots / sizeof slots[0])", CT_OK, 3);
     check(a, "struct Point here; enum { SPAN = sizeof here.x + sizeof \"ab\" }; SPAN", CT_OK, (int)sizeof(int) + 3);
+    check(a, "int picks[2] = {5, 6}; int pick(int c) { return 1 && (c ? picks[0] : picks[1]); } pick(0) + pick(1)", CT_OK, 2);
+    check(a, "int scalar = 1, chooser = 1; chooser ? scalar[0] : 2", CT_ERROR, 0);
+    check(a, "int fold_late(int n) { if (n) return 10 / (2 - 2); return 1; } fold_late(0)", CT_OK, 1);
+    check(a, "fold_late(1)", CT_ERROR, 0);
+    check(a, "int shade(int n) { int v = n; { int v = n * 10; if (n) return v + shade(n - 1); } return v; } shade(3)", CT_OK, 60);
+    check(a, "int outer = 5; int peek(void) { int seen_first = outer; int outer = 1; return seen_first + outer; } peek()", CT_OK, 6);
+    check(a, "int unset(void) { int u; return u + 1; } unset()", CT_ERROR, 0);
+    check(a, "int through(void) { int t; int *q = &t; *q = 4; return t; } through()", CT_OK, 4);
+    check(a, "int *escaped; int leak(void) { int gone = 3; escaped = &gone; return gone; } leak(); *escaped", CT_ERROR, 0);
+    check(a, "int jumpy(int m) { if (0) return -1; goto skip; return 0; skip: while (0) m = 0; return m * 2; } jumpy(21)", CT_OK, 42);
+    check(a, "char word[] = \"abc\"; int length_of(const char *s) { int m = 0; while (*s++) m++; return m; } length_of(word)", CT_OK, 3);
+    check(a, "long big = 3000000000; size_t few = 5; unsigned char small = 250; small += 10; (int)(big / 1000000 + few + small)", CT_OK, 3009);
+    check(a, "int climb(int m) { return m ? climb(m - 1) + 1 : 0; } climb(100000)", CT_ERROR, 0);
     ct_clear(a);
     check(a, "x", CT_ERROR, 0);
     ct_destroy(a);

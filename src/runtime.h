@@ -7,7 +7,8 @@
 
 typedef struct Symbol Symbol;
 struct Symbol {
-    char *name;
+    const char *name;    /* a local's name stays in its unit's source; a global's is copied */
+    char *owned_name;
     size_t length, name_capacity;
     uint64_t hash;
     CtValue value;
@@ -15,6 +16,7 @@ struct Symbol {
     int is_static, is_const, enum_constant, has_initializer;
     Node *function;
     Allocation *object; /* the record behind address; alive for as long as the symbol */
+    Allocation own;     /* the record of an unaddressed local, which has address zero */
     uint64_t scope_serial;
     Node *declaration;        /* local declarations only; global ones may outlive their unit */
     Symbol *shadowed_binding; /* the declaration's binding to restore when this scope ends */
@@ -74,6 +76,7 @@ struct CtInterpreter {
     FILE *input, *output, *errors;
     unsigned depth, depth_limit, nesting, nesting_limit;
     size_t steps, step_limit;
+    size_t tick_boundary; /* the next step count that needs the slow checks; 0 once stopped */
     int failed, exit_requested, exit_status, strict;
     uint64_t error_number, token_state;
     unsigned random_state;
@@ -84,10 +87,18 @@ struct CtInterpreter {
     Symbol *symbol_pool;       /* recycled Symbol nodes, avoids malloc/free per scope entry */
     Temporary *temporary_pool; /* recycled Temporary nodes, same reason */
     uint64_t scope_serial;
+    CtValue returned;         /* the value of the return statement being unwound */
+    Node *jump;               /* the goto being unwound */
+    CtValue shown;            /* a final unterminated expression's value, for the REPL */
+    int showing;
 };
 
 CtValue runtime_error(CtInterpreter *interpreter, Token token, const char *message);
 CtValue runtime_convert(CtInterpreter *interpreter, Token token, CtValue value, CtType type);
+/* Evaluate a side-effect-free node now; fails, leaving no trace, if evaluation would. */
+int runtime_fold(CtInterpreter *interpreter, Node *node, CtValue *value);
+void optimize_unit(CtInterpreter *interpreter, Unit *unit);
+void runtime_prepare(Node *node);
 CtValue runtime_invoke(CtInterpreter *interpreter, Token name, CtValue pointer, const CtValue *values, size_t count);
 /* Borrow the remaining promoted arguments, consuming the list for v* I/O. */
 int runtime_va_values(CtInterpreter *interpreter, Token name, CtValue list, const CtValue **values, size_t *count);
