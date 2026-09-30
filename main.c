@@ -311,7 +311,20 @@ static int command(Application *app, char *source) {
                         (void)append_text(&app->source, buffer.data ? buffer.data : "");
                         puts("Session source replayed.");
                     } else { ct_destroy(app->interpreter); app->interpreter = previous; }
-                } else (void)evaluate(app, buffer.data ? buffer.data : "", argument, 1, 1);
+                } else {
+                    int had_main = ct_has_function(app->interpreter, "main");
+                    if (evaluate(app, buffer.data ? buffer.data : "", argument, 1, 1) == CT_OK &&
+                        !had_main && ct_has_function(app->interpreter, "main")) {
+                        const char *arguments[] = {argument};
+                        int status = 0;
+                        CtError error;
+                        ct_set_filename(app->interpreter, argument);
+                        if (ct_run_main(app->interpreter, 1, arguments, &status, &error) != CT_OK)
+                            print_error(app, argument, &error, buffer.data);
+                        ct_set_filename(app->interpreter, NULL);
+                        if (ct_exit_status(app->interpreter, &status)) { free(buffer.data); return 2; }
+                    }
+                }
             }
             free(buffer.data);
         }

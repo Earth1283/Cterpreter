@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+Cterpreter can now run its own front end: `.load main.c` in the REPL starts a Cterpreter inside a Cterpreter, and `Cterpreter main.c` does it from the shell. See "Running itself" in the README.
+
+- `.load FILE` runs `main` when the file defines one and the session did not already have one.
+- Quoted includes are also searched for in `include/`, `src/`, `../include/` and `../src/` relative to the including file, so `main.c` finds `cterpreter.h` and `src/boot.h`.
+- New headers and library: `unistd.h` (`isatty`, `STD*_FILENO`), `signal.h` gains `struct sigaction`, `sigset_t`, `sigaction` and `sigemptyset`, `errno.h` gains `EINTR`, and `strtoll`, `strtoul` and `strtoull` join `strtol`.
+- A prototype without a body no longer hides a library function of the same name, and it decides the type of the call's result, including an aggregate.
+- `src/bridge.c` exposes the engine (`ct_*`), `boot_verify`, `config_*` and `terminal_*` to interpreted programs. Each child interpreter shares the caller's streams, budget and frame limit and cannot raise the nesting limit. Handlers installed with `sigaction` run in the interpreted program at the next builtin return or poll, and the native handlers are restored when the interpreter is cleared.
+- `boot.c`, `config.c` and `terminal.c` now belong to the core library instead of the executable.
+
+Calls cost about half what they did, and everything else runs 1.1–1.7× faster. Recursive `fib(30)` went from 275 to 120 ms and a two-argument leaf call in a loop from 375 to 190 ms; Mandelbrot, a bubble sort and a sieve run 1.4–1.7× faster. Callgrind counts 1.85× fewer instructions for `fib` and 1.3× fewer for the loops. Output and diagnostics are unchanged, with two exceptions: a program uses fewer steps, and an argument that cannot be converted to its parameter's type is reported before the arguments after it are evaluated.
+
+- The scalar locals and parameters that no pointer can reach now live in a frame, one per activation, that the function keeps and reuses. Declaring one resets its contents and nothing else; there is no symbol to allocate, bind and release. A block that declares only such locals needs no scope.
+- A function whose parameters are all of that kind, and which returns a scalar or nothing, is called without an argument frame: each argument is evaluated straight into the callee's frame, and the result comes straight back from `return`.
+- A call through a pointer variable remembers the function it last found at that address. `&name`, global and aggregate names, and a function's name used as a value have evaluators of their own.
+- `+`, `-`, `*` and the comparisons have `int` and `double` forms for a local against a constant or another local. These, `++` and `--` keep their uncommon cases out of line, so the common one needs no stack frame.
+- Operands that are `char`, 8-byte integer or pointer locals are read in place like `int` and `double` ones, a plain store to an array element skips the general assignment path, and the commonest scalars are encoded and decoded inline.
+- A `return` directly in a function body, and an expression statement that is the whole body of a loop or an `if`, are performed without the statement dispatch.
+
 ## 0.4.0 — 2026-09-25
 
 Programs run about **2.8× faster** than 0.3.1. Output, diagnostics, and strict-mode behaviour are unchanged. The exceptions are the step and depth limits, which now count work differently (see below), and one crash that is now a diagnostic. Most of the speed comes from a new pass that runs over each submission after parsing and before anything executes.

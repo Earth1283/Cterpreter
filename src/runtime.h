@@ -25,6 +25,15 @@ struct Symbol {
     Symbol *bucket_next; /* hash-bucket chain within the owning scope's index, see lookup() */
 };
 
+/* The private locals of one activation: scalars no pointer can reach and only
+ * lexically bound names use. A symbol here belongs to one declaration for good,
+ * so declaring it again only resets its contents. */
+typedef struct Frame Frame;
+struct Frame {
+    Frame *next, *all_next;
+    Symbol symbols[];
+};
+
 typedef struct Temporary Temporary;
 struct Temporary { uint64_t address; Temporary *next; };
 
@@ -38,6 +47,21 @@ struct Scope {
     Temporary *temporaries;
     Scope *parent;
 };
+
+typedef enum { HANDLE_INTERPRETER, HANDLE_TERMINAL } HandleKind;
+
+/* A native object an interpreted program holds by address: an interpreter it created, or a terminal. */
+typedef struct Handle Handle;
+struct Handle {
+    uint64_t address;
+    HandleKind kind;
+    void *object;
+    char *text; /* the native copy of a string the object keeps a pointer to */
+    Handle *next;
+};
+
+#define BRIDGE_STRINGS 64
+#define SIGNAL_SLOTS 32
 
 typedef struct HostFile HostFile;
 struct HostFile {
@@ -81,10 +105,20 @@ struct CtInterpreter {
     uint64_t error_number, token_state;
     unsigned random_state;
     HostFile *files;
+    Handle *handles;
+    struct { const char *host; uint64_t address; } bridge_strings[BRIDGE_STRINGS];
+    size_t bridge_string_count;
+    CtValue result_slot;      /* where a native function writes an aggregate it returns */
+    CtValue signal_handlers[SIGNAL_SLOTS];
+    void *previous_actions[SIGNAL_SLOTS];
+    unsigned char signal_installed[SIGNAL_SLOTS];
+    int handlers_installed;   /* whether interpreted code has taken over any signal */
     FunctionRef *functions; /* sorted by address, since addresses are handed out in increasing order */
     size_t function_count, function_capacity;
     VaFrame *va_frame;
     Symbol *symbol_pool;       /* recycled Symbol nodes, avoids malloc/free per scope entry */
+    Frame *frame;              /* the running function's private locals */
+    Frame *frames;             /* every frame ever made, for ct_clear */
     Temporary *temporary_pool; /* recycled Temporary nodes, same reason */
     uint64_t scope_serial;
     CtValue returned;         /* the value of the return statement being unwound */
@@ -111,6 +145,26 @@ int builtin_value(CtInterpreter *interpreter, Token name, CtValue *value);
 /* errno is a real object so that a program may assign to it. */
 int builtin_object(CtInterpreter *interpreter, Token name, uint64_t *address, CtType *type);
 void builtin_cleanup(CtInterpreter *interpreter);
+char *builtin_string(CtInterpreter *interpreter, Token name, CtValue value);
+FILE *builtin_stream(CtInterpreter *interpreter, Token name, CtValue value);
+CtValue builtin_copy_string(CtInterpreter *interpreter, Token name, const char *text);
+
+/* Native services the front end is built from, callable from interpreted source that declares them. */
+enum {
+    BR_CT_CREATE, BR_CT_DESTROY, BR_CT_CLEAR, BR_CT_SET_INTERRUPT, BR_CT_SET_FILENAME, BR_CT_SET_LIMITS,
+    BR_CT_SET_NESTING, BR_CT_SET_STRICT, BR_CT_EXIT_STATUS, BR_CT_HAS_FUNCTION, BR_CT_RUN_MAIN,
+    BR_CT_INSPECT_TYPE, BR_CT_DUMP_AST, BR_CT_DUMP, BR_CT_CHECK, BR_CT_SIGNATURE, BR_CT_COMPLETE,
+    BR_CT_TYPE_NAME, BR_CT_TYPE_SIZE, BR_CT_EVAL, BR_CT_FORMAT_VALUE, BR_CT_PRINT_VALUE, BR_CT_DEPTH,
+    BR_BOOT_VERIFY, BR_CONFIG_DEFAULTS, BR_CONFIG_INDEX, BR_CONFIG_NAME, BR_CONFIG_VALUE,
+    BR_CONFIG_DESCRIPTION, BR_CONFIG_SET, BR_CONFIG_LOAD, BR_CONFIG_SAVE, BR_TERMINAL_INIT,
+    BR_TERMINAL_READ, BR_TERMINAL_DESTROY, BR_COUNT
+};
+CtValue bridge_call(CtInterpreter *interpreter, Token name, size_t id, const CtValue *args);
+void bridge_cleanup(CtInterpreter *interpreter);
+int bridge_sigaction(CtInterpreter *interpreter, Token name, const CtValue *args);
+/* Runs the interpreted handlers of signals that arrived since the last safe point. */
+void bridge_deliver(CtInterpreter *interpreter);
+extern volatile sig_atomic_t bridge_pending;
 CtValue builtin_call(CtInterpreter *interpreter, Token name, size_t id,
                      const CtValue *args, size_t count);
 

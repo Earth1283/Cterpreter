@@ -95,6 +95,29 @@ static void arithmetic_init(void) {
     ready = 1;
 }
 
+/* memory_decode() and memory_encode() with the commonest scalars decided inline. */
+static ALWAYS_INLINE CtValue decode_scalar(const unsigned char *data, CtType type) {
+    CtValue value = {.type = type};
+    if (type == CT_INT) {
+        int whole;
+        memcpy(&whole, data, sizeof whole);
+        value.as.integer = whole;
+    } else if (type == CT_DOUBLE || (type > CT_VOID && type_kind(type) == TY_POINTER)) memcpy(&value.as, data, sizeof value.as);
+    else if (type == CT_CHAR) value.as.integer = (char)data[0];
+    else return memory_decode(data, type);
+    return value;
+}
+
+static ALWAYS_INLINE void encode_scalar(unsigned char *data, CtValue value) {
+    if (value.type == CT_INT) {
+        int whole = (int)value.as.integer;
+        memcpy(data, &whole, sizeof whole);
+    } else if (value.type == CT_DOUBLE || (value.type > CT_VOID && type_kind(value.type) == TY_POINTER))
+        memcpy(data, &value.as, sizeof value.as);
+    else if (value.type == CT_CHAR) data[0] = (unsigned char)value.as.integer;
+    else memory_encode(data, value);
+}
+
 static void scope_clear(CtInterpreter *interpreter, Scope *scope) {
     Symbol *symbol = scope->symbols;
     while (symbol) {
@@ -125,6 +148,11 @@ static void scope_clear(CtInterpreter *interpreter, Scope *scope) {
         temporary = next;
     }
     scope->temporaries = NULL;
+}
+
+/* Ends a scope that will not be reused, which is nothing to do when it is empty. */
+static inline void scope_close(CtInterpreter *interpreter, Scope *scope) {
+    if (scope->symbols || scope->temporaries) scope_clear(interpreter, scope);
 }
 
 static uint64_t token_hash(Token token) {
@@ -223,6 +251,12 @@ void ct_clear(CtInterpreter *interpreter) {
         free(interpreter->symbol_pool);
         interpreter->symbol_pool = next;
     }
+    while (interpreter->frames) {
+        Frame *next = interpreter->frames->all_next;
+        free(interpreter->frames);
+        interpreter->frames = next;
+    }
+    interpreter->frame = NULL;
     while (interpreter->temporary_pool) {
         Temporary *next = interpreter->temporary_pool->next;
         free(interpreter->temporary_pool);
@@ -256,6 +290,11 @@ CtValue runtime_error(CtInterpreter *interpreter, Token token, const char *messa
         (void)snprintf(interpreter->error->message, sizeof interpreter->error->message, "%s", message);
     }
     return integer(0);
+}
+
+/* For the fast paths: the token goes by reference, so reporting costs them no stack. */
+static NOINLINE CtValue error_at(CtInterpreter *interpreter, const Token *token, const char *message) {
+    return runtime_error(interpreter, *token, message);
 }
 
 /* Strict mode turns an invalid access into the signal the program would have earned natively. */
@@ -292,6 +331,7 @@ static NOINLINE int tick_slow(CtInterpreter *interpreter, Node *node) {
         (void)runtime_error(interpreter, node->token, "execution interrupted");
         return 0;
     }
+    if (bridge_pending) bridge_deliver(interpreter);
     rearm(interpreter);
     return 1;
 }
@@ -353,8 +393,14 @@ static NOINLINE Symbol *resolve_again(Scope *scope, Node *node) {
     return symbol;
 }
 
+/* The symbol a lexically bound name refers to: in the frame, or wherever its declaration last put it. */
+static inline Symbol *local_symbol(CtInterpreter *interpreter, Node *name) {
+    if (name->frame_offset) return (Symbol *)(void *)((char *)interpreter->frame + name->frame_offset);
+    return name->cache.use.declaration->cache.binding.symbol;
+}
+
 static inline Symbol *resolve(CtInterpreter *interpreter, Node *node) {
-    if (node->resolution == RESOLVE_LOCAL) return node->cache.use.declaration->cache.binding.symbol;
+    if (node->resolution == RESOLVE_LOCAL) return local_symbol(interpreter, node);
     Scope *scope = node->resolution == RESOLVE_GLOBAL ? &interpreter->globals : interpreter->scope;
     if (node->cache.use.scope == scope->serial && node->cache.use.symbols == scope->symbol_count)
         return node->cache.use.symbol;
@@ -417,7 +463,7 @@ static Symbol *define(CtInterpreter *interpreter, Node *node, CtType type, Symbo
 }
 
 /* The record of a local no pointer can reach; it stays outside the address space. */
-static Allocation *own_record(Symbol *symbol, size_t size, int zero) {
+static inline Allocation *own_record(Symbol *symbol, size_t size, int zero) {
     Allocation *record = &symbol->own;
     memset(record->storage, 0, sizeof record->storage);
     record->address = 0;
@@ -429,6 +475,45 @@ static Allocation *own_record(Symbol *symbol, size_t size, int zero) {
     record->fully_initialized = zero;
     record->uninitialized = zero ? 0 : size;
     return record;
+}
+
+static NOINLINE void frame_adopt(Symbol *symbol, Node *node) {
+    *symbol = (Symbol){.name = node->token.start, .length = node->token.length, .value.type = node->type,
+                       .declaration = node};
+    symbol->object = own_record(symbol, ct_type_size(node->type), 1);
+}
+
+/* Starts the lifetime of a private local in a frame, zeroed. */
+static inline Symbol *frame_declare(Frame *frame, Node *node, int initialized) {
+    Symbol *symbol = (Symbol *)(void *)((char *)frame + node->frame_offset);
+    if (symbol->declaration != node) frame_adopt(symbol, node);
+    Allocation *record = &symbol->own;
+    memset(record->storage, 0, sizeof record->storage);
+    record->fully_initialized = initialized;
+    record->uninitialized = initialized ? 0 : record->size;
+    return symbol;
+}
+
+static NOINLINE Frame *frame_create(CtInterpreter *interpreter, const Token *name, Node *function) {
+    Frame *frame = calloc(1, sizeof *frame + (size_t)function->slot * sizeof *frame->symbols);
+    if (!frame) { (void)runtime_error(interpreter, *name, "out of memory"); return NULL; }
+    frame->all_next = interpreter->frames;
+    interpreter->frames = frame;
+    return frame;
+}
+
+/* A frame for the function's next activation, which the caller fills before
+ * making it current: its arguments are evaluated in the caller's own frame. */
+static inline Frame *frame_take(CtInterpreter *interpreter, const Token *name, Node *function) {
+    Frame *frame = function->spare_frames;
+    if (!frame) return frame_create(interpreter, name, function);
+    function->spare_frames = frame->next;
+    return frame;
+}
+
+static inline void frame_give(Node *function, Frame *frame) {
+    frame->next = function->spare_frames;
+    function->spare_frames = frame;
 }
 
 static uint64_t temporary_object(CtInterpreter *interpreter, Scope *scope, Token token, size_t size) {
@@ -656,8 +741,8 @@ static ALWAYS_INLINE CtValue int_binary(CtInterpreter *interpreter, const Token 
         case '-': value = a - b; break;
         case '*': value = a * b; break;
         case '/': case '%':
-            if (!b) return runtime_error(interpreter, *token, "division by zero");
-            if (a == INT_MIN && b == -1) return runtime_error(interpreter, *token, "signed integer overflow");
+            if (!b) return error_at(interpreter, token, "division by zero");
+            if (a == INT_MIN && b == -1) return error_at(interpreter, token, "signed integer overflow");
             value = kind == '/' ? a / b : a % b;
             break;
         case '&': return integer(a & b);
@@ -670,9 +755,9 @@ static ALWAYS_INLINE CtValue int_binary(CtInterpreter *interpreter, const Token 
         case TK_LE: return integer(a <= b);
         case TK_GE: return integer(a >= b);
         case TK_SHL: case TK_SHR: return shift_operation(interpreter, token, kind, integer(a), integer(b));
-        default: return runtime_error(interpreter, *token, "unsupported operator");
+        default: return error_at(interpreter, token, "unsupported operator");
     }
-    if (value < INT_MIN || value > INT_MAX) return runtime_error(interpreter, *token, "signed integer overflow");
+    if (value < INT_MIN || value > INT_MAX) return error_at(interpreter, token, "signed integer overflow");
     return integer(value);
 }
 
@@ -1063,7 +1148,7 @@ static inline CtValue read_value(CtInterpreter *interpreter, const Token *token,
         Allocation *record = object.object ? object.object : scalar_record(&interpreter->memory, object.address, info);
         if (record && covers(record, object.address, info->size)) {
             size_t offset = (size_t)(object.address - record->address);
-            if (bytes_initialized(record, offset, info->size)) return memory_decode(record->data + offset, object.type);
+            if (bytes_initialized(record, offset, info->size)) return decode_scalar(record->data + offset, object.type);
         }
     }
     return read_checked(interpreter, token, object);
@@ -1125,7 +1210,7 @@ static inline CtValue store_value(CtInterpreter *interpreter, const Token *token
         if (value.type == CT_INT) {
             int whole = (int)value.as.integer;
             memcpy(record->data + offset, &whole, sizeof whole);
-        } else memory_encode(record->data + offset, value);
+        } else encode_scalar(record->data + offset, value);
         memory_mark(record, offset, info->size);
         return value;
     }
@@ -1287,7 +1372,7 @@ static inline int quick_load(Memory *memory, const Node *node, Allocation *recor
         case SHAPE_SCALAR:
             if (!record) record = memory_find(memory, address);
             if (!record || !record->alive || address - record->address > record->size || !readable(node, record, address)) return 0;
-            *result = memory_decode(record->data + (address - record->address), node->cache.access.target);
+            *result = decode_scalar(record->data + (address - record->address), node->cache.access.target);
             return 1;
         case SHAPE_ARRAY: *result = (CtValue){.type = node->cache.access.decayed, .as.address = address}; return 1;
         case SHAPE_AGGREGATE: *result = (CtValue){.type = node->cache.access.target, .as.address = address}; return 1;
@@ -1565,8 +1650,60 @@ static NOINLINE CtValue finish_call(CtInterpreter *interpreter, const Token *nam
     return result;
 }
 
+/* Runs a function the optimizer marked simple, whose parameters are already in
+ * the frame; a function with nothing private has none. A bare body declares and
+ * keeps nothing in a scope, so it runs directly above the globals. */
+static ALWAYS_INLINE CtValue enter_simple(CtInterpreter *interpreter, const Token *name, Node *function, Frame *frame) {
+    Scope *caller = interpreter->scope;
+    Frame *outer = interpreter->frame;
+    Scope scope;
+    int bare = function->right->bare;
+    if (frame) interpreter->frame = frame;
+    if (bare) interpreter->scope = &interpreter->globals;
+    else {
+        scope_open(interpreter, &scope, &interpreter->globals);
+        interpreter->scope = &scope;
+    }
+    Flow flow = sequence(interpreter, function->right->left);
+    CtType returns = function->returns;
+    int finished = !interpreter->failed && !interpreter->exit_requested;
+    CtValue result;
+    if (finished && returns == CT_VOID && flow != FLOW_GOTO) result = (CtValue){.type = CT_VOID};
+    else if (finished && flow == FLOW_RETURN && interpreter->returned.type == returns) result = interpreter->returned;
+    else result = finish_call(interpreter, name, function, flow, caller);
+    interpreter->scope = caller;
+    if (!bare) scope_close(interpreter, &scope);
+    if (frame) {
+        interpreter->frame = outer;
+        frame_give(function, frame);
+    }
+    return result;
+}
+
+static ALWAYS_INLINE int bind_simple(CtInterpreter *interpreter, Frame *frame, Node *parameter, CtValue value) {
+    if (value.type != parameter->type) {
+        value = convert(interpreter, &parameter->token, value, parameter->type, 0);
+        if (interpreter->failed) return 0;
+    }
+    encode_scalar(frame_declare(frame, parameter, 1)->own.storage, value);
+    return 1;
+}
+
+/* invoke() for a simple function given as many arguments as it has parameters. */
+static NOINLINE CtValue invoke_simple(CtInterpreter *interpreter, const Token *name, Node *function, const CtValue *values) {
+    Frame *frame = function->slot ? frame_take(interpreter, name, function) : NULL;
+    if (function->slot && !frame) return integer(0);
+    for (Node *p = function->left; p; p = p->next)
+        if (!bind_simple(interpreter, frame, p, *values++)) {
+            frame_give(function, frame);
+            return integer(0);
+        }
+    return enter_simple(interpreter, name, function, frame);
+}
+
 /* Binds already-evaluated arguments to an interpreted function and runs its body. */
 static CtValue invoke(CtInterpreter *interpreter, const Token *name, Node *function, const CtValue *values, size_t count) {
+    if (function->simple && (size_t)function->simple == count + 1) return invoke_simple(interpreter, name, function, values);
     if (!function->right) return runtime_error(interpreter, *name, "function is declared but not defined");
     size_t parameters = 0;
     for (Node *p = function->left; p; p = p->next) ++parameters;
@@ -1574,6 +1711,12 @@ static CtValue invoke(CtInterpreter *interpreter, const Token *name, Node *funct
         return runtime_error(interpreter, *name, "incorrect number of arguments");
     Scope *caller = interpreter->scope;
     Scope frame;
+    Frame *outer = interpreter->frame;
+    if (function->slot) {
+        Frame *locals = frame_take(interpreter, name, function);
+        if (!locals) return integer(0);
+        interpreter->frame = locals;
+    }
     scope_open(interpreter, &frame, &interpreter->globals);
     interpreter->scope = &frame;
     VaFrame arguments = {.function = function, .scope = &frame, .count = count - parameters,
@@ -1584,16 +1727,15 @@ static CtValue invoke(CtInterpreter *interpreter, const Token *name, Node *funct
                         collect_variadic(interpreter, name, &arguments, values + parameters, inline_variadic);
     size_t index = 0;
     for (Node *p = function->left; p && !interpreter->failed; p = p->next) {
-        Symbol *parameter = define(interpreter, p, p->type, NULL);
-        if (!parameter) break;
         CtValue value = values[index++];
         if (p->unaddressed == 1) {
-            parameter->object = own_record(parameter, ct_type_size(p->type), 1);
             value = convert(interpreter, &p->token, value, p->type, 0);
             if (interpreter->failed) break;
-            memory_encode(parameter->object->data, value);
+            encode_scalar(frame_declare(interpreter->frame, p, 1)->own.storage, value);
             continue;
         }
+        Symbol *parameter = define(interpreter, p, p->type, NULL);
+        if (!parameter) break;
         parameter->object = memory_allocate_record(&interpreter->memory, ct_type_size(p->type), 1, 0);
         if (!parameter->object) { (void)memory_error(interpreter, &p->token); break; }
         parameter->address = parameter->object->address;
@@ -1604,6 +1746,10 @@ static CtValue invoke(CtInterpreter *interpreter, const Token *name, Node *funct
     CtValue result = finish_call(interpreter, name, function, flow, caller);
     scope_clear(interpreter, &frame);
     interpreter->scope = caller;
+    if (function->slot) {
+        frame_give(function, interpreter->frame);
+        interpreter->frame = outer;
+    }
     interpreter->va_frame = arguments.parent;
     if (heap_variadic) free(arguments.values);
     return result;
@@ -1624,16 +1770,36 @@ CtValue runtime_invoke(CtInterpreter *interpreter, Token name, CtValue pointer, 
     return result;
 }
 
+/* A prototype for a library function decides the type of the result, and where an aggregate is returned. */
+static CtValue call_builtin(CtInterpreter *interpreter, const Token *name, size_t builtin, Node *prototype,
+                            const CtValue *values, size_t arguments) {
+    CtType declared = prototype ? type_target(prototype->type) : CT_VOID;
+    interpreter->result_slot = (CtValue){.type = CT_VOID};
+    if (type_is_aggregate(declared)) {
+        uint64_t object = temporary_object(interpreter, interpreter->scope, *name, ct_type_size(declared));
+        if (!object) return integer(0);
+        interpreter->result_slot = (CtValue){.type = declared, .as.address = object};
+    }
+    CtValue result = builtin_call(interpreter, *name, builtin, values, arguments);
+    if (bridge_pending) bridge_deliver(interpreter);
+    if (!interpreter->failed && type_is_scalar(declared) && type_is_scalar(result.type))
+        result = convert(interpreter, name, result, declared, 0);
+    return result;
+}
+
 static CtValue call(CtInterpreter *interpreter, Node *node) {
     Node *callee = node->left;
     Node *function = NULL;
     const Token *name = callee && callee->kind == N_NAME ? &callee->token : &node->token;
     int native = 0;
     size_t builtin = 0;
+    Node *prototype = NULL;
     if (callee && callee->kind == N_NAME) {
         Symbol *symbol = resolve(interpreter, callee);
-        if (symbol && symbol->function) function = symbol->function;
-        else if (!symbol) {
+        if (symbol && symbol->function && (symbol->function->right || !builtin_resolve(callee->token, &builtin)))
+            function = symbol->function;
+        else if (!symbol || symbol->function) {
+            if (symbol) prototype = symbol->function;
             if (node->builtin_id) {
                 builtin = (size_t)(node->builtin_id - 1);
                 native = 1;
@@ -1660,9 +1826,8 @@ static CtValue call(CtInterpreter *interpreter, Node *node) {
     for (Node *a = node->right; a && !interpreter->failed; a = a->next)
         values[index++] = operand(interpreter, a);
     CtValue result = integer(0);
-    if (!interpreter->failed)
-        result = native ? builtin_call(interpreter, *name, builtin, values, arguments)
-                        : invoke(interpreter, name, function, values, arguments);
+    if (!interpreter->failed && native) result = call_builtin(interpreter, name, builtin, prototype, values, arguments);
+    else if (!interpreter->failed) result = invoke(interpreter, name, function, values, arguments);
     if (values != inline_values) free(values);
     return result;
 }
@@ -1800,10 +1965,11 @@ static NOINLINE CtValue evaluate_node(CtInterpreter *interpreter, Node *node) {
             CtType type = symbol->value.type;
             TypeKind kind = type_kind(type);
             if (scalar_kind(kind) && symbol->object && symbol->object->fully_initialized)
-                return memory_decode(symbol->object->data, type);
+                return decode_scalar(symbol->object->data, type);
             if (kind == TY_ARRAY) return (CtValue){.type = type_pointer(type_target(type)), .as.address = symbol->address};
             if (kind == TY_STRUCT || kind == TY_UNION) return (CtValue){.type = type, .as.address = symbol->address};
-        }
+        } else if (symbol && type_is_function(symbol->value.type))
+            return (CtValue){.type = type_pointer(symbol->value.type), .as.address = symbol->address};
     }
     if (++interpreter->depth > interpreter->depth_limit) {
         --interpreter->depth;
@@ -1825,67 +1991,50 @@ static CtValue evaluate(CtInterpreter *interpreter, Node *node) {
  * recursion, so it charges at once for every evaluation enclosing it in its
  * statement; nesting between calls is capped by the parser. */
 
-static inline Symbol *local_symbol(Node *name) { return name->cache.use.declaration->cache.binding.symbol; }
 
 static CtValue run_local(CtInterpreter *interpreter, Node *node);
 static CtValue run_local_int(CtInterpreter *interpreter, Node *node);
 static CtValue run_local_double(CtInterpreter *interpreter, Node *node);
 
-static inline Allocation *initialized_local(Node *name) {
-    Symbol *symbol = local_symbol(name);
+static inline Allocation *initialized_local(CtInterpreter *interpreter, Node *name) {
+    Symbol *symbol = local_symbol(interpreter, name);
     Allocation *record = symbol ? symbol->object : NULL;
     return record && record->fully_initialized ? record : NULL;
 }
 
 enum { FETCH_EVALUATE, FETCH_CONSTANT, FETCH_INT, FETCH_DOUBLE, FETCH_ARRAY, FETCH_CHAR, FETCH_UCHAR, FETCH_WORD };
 
-static NOINLINE int fetch_local(CtInterpreter *interpreter, Node *node, CtValue *value) {
-    Allocation *record = initialized_local(node);
-    if (record) {
-        if (node->fetch == FETCH_CHAR) *value = (CtValue){.type = CT_CHAR, .as.integer = (char)record->data[0]};
-        else if (node->fetch == FETCH_UCHAR) *value = (CtValue){.type = CT_UCHAR, .as.unsigned_integer = record->data[0]};
-        else {
-            /* Every 8-byte integer or pointer occupies the whole of the value's union. */
-            uint64_t bits;
-            memcpy(&bits, record->data, sizeof bits);
-            *value = (CtValue){.type = local_symbol(node)->value.type, .as.unsigned_integer = bits};
-        }
-        return 1;
-    }
-    *value = evaluate(interpreter, node);
-    return !interpreter->failed;
-}
-
 /* Constants and initialized local scalars are read in place; every statement
  * and every other node still ticks, so loops keep consuming steps. Only an
- * evaluation can fail, which is all the result reports. */
+ * evaluation can fail, which is all the result reports. A local's name carries
+ * the type to read it as. */
 static ALWAYS_INLINE int fetch(CtInterpreter *interpreter, Node *node, CtValue *value) {
-    Allocation *record;
     int kind = node->fetch;
     if (kind == FETCH_CONSTANT) {
         *value = node->token.value;
         return 1;
     }
-    if (kind == FETCH_INT && (record = initialized_local(node))) {
-        int whole;
-        memcpy(&whole, record->data, sizeof whole);
-        *value = integer(whole);
-        return 1;
-    }
-    if (kind == FETCH_DOUBLE && (record = initialized_local(node))) {
-        double real;
-        memcpy(&real, record->data, sizeof real);
-        *value = (CtValue){.type = CT_DOUBLE, .as.real = real};
-        return 1;
-    }
-    if (kind == FETCH_ARRAY) {
-        Symbol *symbol = local_symbol(node);
-        if (symbol) {
-            *value = (CtValue){.type = node->type, .as.address = symbol->address};
+    if (kind != FETCH_EVALUATE) {
+        Symbol *symbol = local_symbol(interpreter, node);
+        Allocation *record = symbol ? symbol->object : NULL;
+        if (kind == FETCH_ARRAY) {
+            if (symbol) {
+                *value = (CtValue){.type = node->type, .as.address = symbol->address};
+                return 1;
+            }
+        } else if (record && record->fully_initialized) {
+            value->type = node->type;
+            if (kind == FETCH_INT) {
+                int whole;
+                memcpy(&whole, record->data, sizeof whole);
+                value->as.integer = whole;
+            } else if (kind == FETCH_CHAR) value->as.integer = (char)record->data[0];
+            else if (kind == FETCH_UCHAR) value->as.unsigned_integer = record->data[0];
+            /* A double, an 8-byte integer or a pointer occupies the whole of the value's union. */
+            else memcpy(&value->as, record->data, sizeof value->as);
             return 1;
         }
     }
-    if (kind > FETCH_ARRAY) return fetch_local(interpreter, node, value);
     *value = evaluate(interpreter, node);
     return !interpreter->failed;
 }
@@ -1897,13 +2046,13 @@ static inline CtValue operand(CtInterpreter *interpreter, Node *node) {
 }
 
 static CtValue run_local(CtInterpreter *interpreter, Node *node) {
-    Symbol *symbol = local_symbol(node);
-    if (symbol && symbol->object && symbol->object->fully_initialized) return memory_decode(symbol->object->data, symbol->value.type);
+    Symbol *symbol = local_symbol(interpreter, node);
+    if (symbol && symbol->object && symbol->object->fully_initialized) return decode_scalar(symbol->object->data, symbol->value.type);
     return evaluate_node(interpreter, node);
 }
 
 static CtValue run_local_int(CtInterpreter *interpreter, Node *node) {
-    Allocation *record = initialized_local(node);
+    Allocation *record = initialized_local(interpreter, node);
     if (!record) return evaluate_node(interpreter, node);
     int value;
     memcpy(&value, record->data, sizeof value);
@@ -1911,15 +2060,42 @@ static CtValue run_local_int(CtInterpreter *interpreter, Node *node) {
 }
 
 static CtValue run_local_double(CtInterpreter *interpreter, Node *node) {
-    Allocation *record = initialized_local(node);
+    Allocation *record = initialized_local(interpreter, node);
     if (!record) return evaluate_node(interpreter, node);
     double value;
     memcpy(&value, record->data, sizeof value);
     return (CtValue){.type = CT_DOUBLE, .as.real = value};
 }
 
+/* Any other name. What its symbol's type calls for is remembered with that type. */
+static CtValue run_name(CtInterpreter *interpreter, Node *node) {
+    Symbol *symbol = resolve(interpreter, node);
+    if (!symbol) return evaluate_node(interpreter, node);
+    CtType type = symbol->value.type;
+    if (symbol->function) {
+        if (!type_is_function(type)) return evaluate_node(interpreter, node);
+        return (CtValue){.type = type_pointer(type), .as.address = symbol->address};
+    }
+    if (node->cached >> 2 != type + 1) {
+        TypeKind kind = type_kind(type);
+        int shape = scalar_kind(kind) ? SHAPE_SCALAR : kind == TY_ARRAY ? SHAPE_ARRAY
+                  : kind == TY_STRUCT || kind == TY_UNION ? SHAPE_AGGREGATE : SHAPE_OTHER;
+        if (shape == SHAPE_ARRAY) node->type = type_pointer(type_target(type));
+        node->cached = ((type + 1) << 2) | shape;
+    }
+    switch (node->cached & 3) {
+        case SHAPE_SCALAR:
+            if (symbol->object && symbol->object->fully_initialized) return decode_scalar(symbol->object->data, type);
+            break;
+        case SHAPE_ARRAY: return (CtValue){.type = node->type, .as.address = symbol->address};
+        case SHAPE_AGGREGATE: return (CtValue){.type = type, .as.address = symbol->address};
+        default: break;
+    }
+    return evaluate_node(interpreter, node);
+}
+
 static CtValue run_local_array(CtInterpreter *interpreter, Node *node) {
-    Symbol *symbol = local_symbol(node);
+    Symbol *symbol = local_symbol(interpreter, node);
     if (symbol) return (CtValue){.type = type_pointer(type_target(symbol->value.type)), .as.address = symbol->address};
     return evaluate_node(interpreter, node);
 }
@@ -1949,7 +2125,67 @@ ARITHMETIC(bit_and, '&')
 ARITHMETIC(bit_or, '|')
 ARITHMETIC(bit_xor, '^')
 
-static CtValue run_arithmetic(CtInterpreter *interpreter, Node *node) {
+static CtValue run_arithmetic(CtInterpreter *interpreter, Node *node);
+
+/* An int local against an int constant or another int local. */
+static ALWAYS_INLINE CtValue int_arithmetic(CtInterpreter *interpreter, Node *node, int kind) {
+    Allocation *left = initialized_local(interpreter, node->left);
+    Node *other = node->right;
+    Allocation *right = other->kind == N_VALUE ? left : initialized_local(interpreter, other);
+    if (!left || !right) return run_arithmetic(interpreter, node);
+    int a, b;
+    memcpy(&a, left->data, sizeof a);
+    if (other->kind == N_VALUE) b = (int)other->token.value.as.integer;
+    else memcpy(&b, right->data, sizeof b);
+    return int_binary(interpreter, &node->token, kind, a, b);
+}
+
+#define INT_ARITHMETIC(name, kind) \
+    static CtValue run_int_##name(CtInterpreter *interpreter, Node *node) { return int_arithmetic(interpreter, node, kind); }
+INT_ARITHMETIC(add, '+')
+INT_ARITHMETIC(subtract, '-')
+INT_ARITHMETIC(multiply, '*')
+INT_ARITHMETIC(less, '<')
+INT_ARITHMETIC(greater, '>')
+INT_ARITHMETIC(less_equal, TK_LE)
+INT_ARITHMETIC(greater_equal, TK_GE)
+INT_ARITHMETIC(equal, TK_EQ)
+INT_ARITHMETIC(not_equal, TK_NE)
+
+/* The same for a double local. A result that is not finite is the general path's to report. */
+static ALWAYS_INLINE CtValue double_arithmetic(CtInterpreter *interpreter, Node *node, int kind) {
+    Allocation *left = initialized_local(interpreter, node->left);
+    Node *other = node->right;
+    Allocation *right = other->kind == N_VALUE ? left : initialized_local(interpreter, other);
+    if (!left || !right) return run_arithmetic(interpreter, node);
+    double a, b, value;
+    memcpy(&a, left->data, sizeof a);
+    if (other->kind == N_VALUE) b = other->token.value.as.real;
+    else memcpy(&b, right->data, sizeof b);
+    switch (kind) {
+        case '+': value = a + b; break;
+        case '-': value = a - b; break;
+        case '*': value = a * b; break;
+        case '<': return integer(a < b);
+        case '>': return integer(a > b);
+        case TK_LE: return integer(a <= b);
+        default: return integer(a >= b);
+    }
+    if (!isfinite(value)) return run_arithmetic(interpreter, node);
+    return (CtValue){.type = CT_DOUBLE, .as.real = value};
+}
+
+#define DOUBLE_ARITHMETIC(name, kind) \
+    static CtValue run_double_##name(CtInterpreter *interpreter, Node *node) { return double_arithmetic(interpreter, node, kind); }
+DOUBLE_ARITHMETIC(add, '+')
+DOUBLE_ARITHMETIC(subtract, '-')
+DOUBLE_ARITHMETIC(multiply, '*')
+DOUBLE_ARITHMETIC(less, '<')
+DOUBLE_ARITHMETIC(greater, '>')
+DOUBLE_ARITHMETIC(less_equal, TK_LE)
+DOUBLE_ARITHMETIC(greater_equal, TK_GE)
+
+static NOINLINE CtValue run_arithmetic(CtInterpreter *interpreter, Node *node) {
     return arithmetic(interpreter, node, node->token.kind);
 }
 
@@ -1964,12 +2200,12 @@ static CtValue run_logical(CtInterpreter *interpreter, Node *node) {
 
 /* x = e and x op= e, for a local scalar x that can be written in place. */
 static ALWAYS_INLINE CtValue assign_local(CtInterpreter *interpreter, Node *node, int op) {
-    Symbol *symbol = local_symbol(node->left);
+    Symbol *symbol = local_symbol(interpreter, node->left);
     Allocation *record = symbol ? symbol->object : NULL;
     if (!record || symbol->is_const || record->readonly || (op != '=' && !record->fully_initialized))
         return assignment(interpreter, node);
     CtType type = symbol->value.type;
-    CtValue old = op == '=' ? integer(0) : memory_decode(record->data, type);
+    CtValue old = op == '=' ? integer(0) : decode_scalar(record->data, type);
     CtValue value;
     if (!fetch(interpreter, node->right, &value)) return integer(0);
     if (op != '=') {
@@ -1980,10 +2216,7 @@ static ALWAYS_INLINE CtValue assign_local(CtInterpreter *interpreter, Node *node
         value = convert(interpreter, &node->token, value, type, 0);
         if (interpreter->failed) return value;
     }
-    if (type == CT_INT) {
-        int whole = (int)value.as.integer;
-        memcpy(record->data, &whole, sizeof whole);
-    } else memory_encode(record->data, value);
+    encode_scalar(record->data, value);
     memory_mark(record, 0, record->size);
     return value;
 }
@@ -2012,7 +2245,21 @@ static CtValue run_assign_index(CtInterpreter *interpreter, Node *node) {
         object = index_lvalue(interpreter, place, pointer, offset);
         if (interpreter->failed) return integer(0);
     }
-    return assign_to(interpreter, node, object);
+    if (node->token.kind != '=' || !object.object) return assign_to(interpreter, node, object);
+    /* A plain store to a whole scalar element; the record may have died while the value was computed. */
+    CtValue value;
+    if (!fetch(interpreter, node->right, &value)) return integer(0);
+    if (value.type != object.type) {
+        value = convert(interpreter, &node->token, value, object.type, 0);
+        if (interpreter->failed) return value;
+    }
+    Allocation *record = object.object;
+    size_t size = place->cache.access.size;
+    if (record->readonly || !covers(record, object.address, size)) return store_value(interpreter, &node->token, object, value);
+    size_t position = (size_t)(object.address - record->address);
+    encode_scalar(record->data + position, value);
+    memory_mark(record, position, size);
+    return value;
 }
 
 static CtValue run_assign_member(CtInterpreter *interpreter, Node *node) {
@@ -2031,26 +2278,14 @@ static CtValue run_assign_dereference(CtInterpreter *interpreter, Node *node) {
     return assign_to(interpreter, node, (Lvalue){pointer.as.address, type_target(pointer.type), 0, NULL});
 }
 
-/* ++ and -- on a local scalar. */
-static CtValue run_step_local(CtInterpreter *interpreter, Node *node) {
-    Symbol *symbol = local_symbol(node->left);
-    Allocation *record = symbol ? symbol->object : NULL;
-    if (!record || !record->fully_initialized || symbol->is_const || record->readonly) return evaluate_node(interpreter, node);
+static NOINLINE CtValue step_local(CtInterpreter *interpreter, Node *node, Symbol *symbol) {
+    Allocation *record = symbol->object;
     int increment = node->token.kind == TK_INCREMENT;
     CtType type = symbol->value.type;
-    if (type == CT_INT) {
-        int old;
-        memcpy(&old, record->data, sizeof old);
-        if (increment ? old != INT_MAX : old != INT_MIN) {
-            int updated = increment ? old + 1 : old - 1;
-            memcpy(record->data, &updated, sizeof updated);
-            return integer(node->kind == N_POSTFIX ? old : updated);
-        }
-    }
-    CtValue old = memory_decode(record->data, type), updated;
+    CtValue old = decode_scalar(record->data, type), updated;
     if (type_kind(type) == TY_POINTER &&
         pointer_offset(&interpreter->memory, increment ? '+' : '-', old, integer(1), &updated)) {
-        memory_encode(record->data, updated);
+        encode_scalar(record->data, updated);
         return node->kind == N_POSTFIX ? old : updated;
     }
     updated = binary(interpreter, increment ? '+' : '-', &node->token, old, integer(1));
@@ -2059,8 +2294,26 @@ static CtValue run_step_local(CtInterpreter *interpreter, Node *node) {
         updated = convert(interpreter, &node->token, updated, type, 0);
         if (interpreter->failed) return integer(0);
     }
-    memory_encode(record->data, updated);
+    encode_scalar(record->data, updated);
     return node->kind == N_POSTFIX ? old : updated;
+}
+
+/* ++ and -- on a local scalar. */
+static CtValue run_step_local(CtInterpreter *interpreter, Node *node) {
+    Symbol *symbol = local_symbol(interpreter, node->left);
+    Allocation *record = symbol ? symbol->object : NULL;
+    if (!record || !record->fully_initialized || symbol->is_const || record->readonly) return evaluate_node(interpreter, node);
+    if (symbol->value.type == CT_INT) {
+        int increment = node->token.kind == TK_INCREMENT;
+        int old;
+        memcpy(&old, record->data, sizeof old);
+        if (increment ? old != INT_MAX : old != INT_MIN) {
+            int updated = increment ? old + 1 : old - 1;
+            memcpy(record->data, &updated, sizeof updated);
+            return integer(node->kind == N_POSTFIX ? old : updated);
+        }
+    }
+    return step_local(interpreter, node, symbol);
 }
 
 static CtValue run_index(CtInterpreter *interpreter, Node *node) {
@@ -2121,12 +2374,55 @@ static CtValue run_cast(CtInterpreter *interpreter, Node *node) {
     return interpreter->failed ? integer(0) : convert(interpreter, &node->token, value, node->type, 1);
 }
 
+static CtValue run_address(CtInterpreter *interpreter, Node *node) {
+    Node *place = node->left;
+    if (place->kind == N_NAME) {
+        Symbol *symbol = resolve(interpreter, place);
+        if (symbol && !symbol->function)
+            return (CtValue){.type = type_pointer(symbol->value.type), .as.address = symbol->address};
+    }
+    return evaluate_node(interpreter, node);
+}
+
+/* The function a pointer variable holds, when finding it cannot fail; call() diagnoses the rest. */
+static inline Node *pointed_function(CtInterpreter *interpreter, Node *node, const Symbol *symbol) {
+    Allocation *record = symbol->object;
+    CtType type = symbol->value.type;
+    if (!record || !record->fully_initialized || type_kind(type) != TY_POINTER || !type_is_function(type_target(type)))
+        return NULL;
+    uint64_t address;
+    memcpy(&address, record->data, sizeof address);
+    if (node->cache.callee.function && node->cache.callee.address == address) return node->cache.callee.function;
+    Node *function = function_at(interpreter, address);
+    if (function && function->right) {
+        node->cache.callee.address = address;
+        node->cache.callee.function = function;
+    }
+    return function;
+}
+
 static CtValue run_call(CtInterpreter *interpreter, Node *node) {
     unsigned charge = (unsigned)node->nesting;
     if (interpreter->depth + charge > interpreter->depth_limit)
         return runtime_error(interpreter, node->token, "evaluation nesting limit exceeded");
     interpreter->depth += charge;
-    CtValue result = call(interpreter, node);
+    CtValue result;
+    Symbol *symbol = node->simple ? resolve(interpreter, node->left) : NULL;
+    Node *function = !symbol ? NULL : symbol->function ? symbol->function : pointed_function(interpreter, node, symbol);
+    if (function && function->simple == node->simple) {
+        /* Each argument goes straight into the callee's frame, converted as it arrives. */
+        const Token *name = &node->left->token;
+        Frame *frame = function->slot ? frame_take(interpreter, name, function) : NULL;
+        Node *parameter = function->left;
+        CtValue value;
+        for (Node *a = node->right; a && !interpreter->failed; a = a->next, parameter = parameter->next)
+            if (frame && fetch(interpreter, a, &value)) (void)bind_simple(interpreter, frame, parameter, value);
+        if (!interpreter->failed) result = enter_simple(interpreter, name, function, frame);
+        else {
+            if (frame) frame_give(function, frame);
+            result = integer(0);
+        }
+    } else result = call(interpreter, node);
     interpreter->depth -= charge;
     return result;
 }
@@ -2140,6 +2436,10 @@ static Flow scoped(CtInterpreter *interpreter, Node *node) {
      * cannot declare anything, so wrapping every iteration in another empty
      * scope only lengthens every name lookup in the hot loop body. Keep the
      * wrapper for the declaration statements this permissive parser accepts. */
+    if (node->kind == N_EXPRESSION && node->terminated) {
+        (void)evaluate(interpreter, node->left);
+        return FLOW_NORMAL;
+    }
     if (node->kind != N_DECLARATION && node->kind != N_GROUP && node->kind != N_ENUMERATOR)
         return execute(interpreter, node);
     Scope scope;
@@ -2147,7 +2447,7 @@ static Flow scoped(CtInterpreter *interpreter, Node *node) {
     interpreter->scope = &scope;
     Flow flow = execute(interpreter, node);
     interpreter->scope = scope.parent;
-    scope_clear(interpreter, &scope);
+    scope_close(interpreter, &scope);
     return flow;
 }
 
@@ -2186,7 +2486,7 @@ static ALWAYS_INLINE void initialize_symbol(CtInterpreter *interpreter, Symbol *
             value = convert(interpreter, &node->left->token, value, node->type, 0);
             if (interpreter->failed) return;
         }
-        memory_encode(record->data, value);
+        encode_scalar(record->data, value);
         memory_mark(record, 0, record->size);
         return;
     }
@@ -2272,7 +2572,10 @@ static int perform_expression(CtInterpreter *interpreter, Node *node) {
 
 static int perform_group(CtInterpreter *interpreter, Node *node) { return sequence(interpreter, node->left); }
 
+static int perform_local(CtInterpreter *interpreter, Node *node);
+
 static int perform_declaration(CtInterpreter *interpreter, Node *node) {
+    if (node->slot) return perform_local(interpreter, node);
     if (node->kind == N_ENUMERATOR && !constant_expression(interpreter, node->left)) {
         (void)runtime_error(interpreter, node->token, "enumerator requires an integer constant expression");
         return FLOW_NORMAL;
@@ -2297,8 +2600,7 @@ static int perform_declaration(CtInterpreter *interpreter, Node *node) {
         symbol->address = node->address;
         symbol->object = memory_find(&interpreter->memory, symbol->address);
     } else {
-        symbol->object = node->unaddressed == 1 ? own_record(symbol, ct_type_size(node->type), zero)
-                                                : memory_allocate_record(&interpreter->memory, ct_type_size(node->type), zero, 0);
+        symbol->object = memory_allocate_record(&interpreter->memory, ct_type_size(node->type), zero, 0);
         if (!symbol->object) { (void)memory_error(interpreter, &node->token); return FLOW_NORMAL; }
         symbol->address = symbol->object->address;
     }
@@ -2310,12 +2612,8 @@ static int perform_declaration(CtInterpreter *interpreter, Node *node) {
 
 static int perform_bare_block(CtInterpreter *interpreter, Node *node) { return sequence(interpreter, node->left); }
 
-/* A private, unaddressed scalar local, whose symbol holds its bytes. */
 static int perform_local(CtInterpreter *interpreter, Node *node) {
-    Symbol *symbol = define(interpreter, node, node->type, NULL);
-    if (!symbol) return FLOW_NORMAL;
-    symbol->has_initializer = node->left != NULL;
-    symbol->object = own_record(symbol, ct_type_size(node->type), node->left != NULL);
+    Symbol *symbol = frame_declare(interpreter->frame, node, node->left != NULL);
     if (node->left) initialize_symbol(interpreter, symbol, node);
     return FLOW_NORMAL;
 }
@@ -2326,7 +2624,7 @@ static int perform_block(CtInterpreter *interpreter, Node *node) {
     interpreter->scope = &scope;
     Flow flow = sequence(interpreter, node->left);
     interpreter->scope = scope.parent;
-    scope_clear(interpreter, &scope);
+    scope_close(interpreter, &scope);
     return flow;
 }
 
@@ -2354,7 +2652,7 @@ static int perform_switch(CtInterpreter *interpreter, Node *node) {
     interpreter->scope = &scope;
     if (!interpreter->failed) flow = sequence(interpreter, match ? match : fallback);
     interpreter->scope = scope.parent;
-    scope_clear(interpreter, &scope);
+    scope_close(interpreter, &scope);
     return flow == FLOW_BREAK ? FLOW_NORMAL : flow;
 }
 
@@ -2392,12 +2690,12 @@ static int perform_for(CtInterpreter *interpreter, Node *node) {
         if (node->third) (void)evaluate(interpreter, node->third);
     }
     interpreter->scope = scope.parent;
-    scope_clear(interpreter, &scope);
+    scope_close(interpreter, &scope);
     return flow == FLOW_RETURN || flow == FLOW_GOTO ? flow : FLOW_NORMAL;
 }
 
 static int perform_return(CtInterpreter *interpreter, Node *node) {
-    interpreter->returned = node->left ? evaluate(interpreter, node->left) : (CtValue){.type = CT_VOID};
+    interpreter->returned = node->left ? operand(interpreter, node->left) : (CtValue){.type = CT_VOID};
     return FLOW_RETURN;
 }
 
@@ -2462,6 +2760,13 @@ static Flow sequence(CtInterpreter *interpreter, Node *head) {
             node = node->next;
             continue;
         }
+        if (node->kind == N_RETURN && interpreter->depth < interpreter->depth_limit) {
+            if (!tick(interpreter, node)) break;
+            ++interpreter->depth;
+            flow = perform_return(interpreter, node);
+            --interpreter->depth;
+            break;
+        }
         flow = execute(interpreter, node);
         if (flow == FLOW_GOTO) {
             Node *label = find_label(head, interpreter->jump);
@@ -2496,6 +2801,9 @@ static void prepare_statement(Node *node) {
 void runtime_prepare(Node *node) {
     int op = node->token.kind;
     CtType type;
+    int slot = node->kind == N_DECLARATION ? node->slot
+             : node->kind == N_NAME && node->resolution == RESOLVE_LOCAL ? node->cache.use.declaration->slot : 0;
+    if (slot) node->frame_offset = (unsigned)(offsetof(Frame, symbols) + (size_t)(slot - 1) * sizeof(Symbol));
     prepare_statement(node);
     switch (node->kind) {
         case N_NAME:
@@ -2504,6 +2812,7 @@ void runtime_prepare(Node *node) {
             else if (type == CT_DOUBLE) node->run = run_local_double;
             else if (type_is_scalar(type)) node->run = run_local;
             else if (type_is_array(type)) node->run = run_local_array;
+            else node->run = run_name;
             break;
         case N_BINARY:
             if (is_assignment(op)) {
@@ -2517,18 +2826,23 @@ void runtime_prepare(Node *node) {
                                : run_update_local;
                 break;
             }
+            CtType pair = local_type(node->left);
+            if ((pair != CT_INT && pair != CT_DOUBLE) ||
+                pair != (node->right->kind == N_VALUE ? node->right->token.value.type : local_type(node->right)))
+                pair = CT_VOID;
+            int ints = pair == CT_INT, doubles = pair == CT_DOUBLE;
             switch (op) {
-                case '+': node->run = run_add; break;
-                case '-': node->run = run_subtract; break;
-                case '*': node->run = run_multiply; break;
+                case '+': node->run = ints ? run_int_add : doubles ? run_double_add : run_add; break;
+                case '-': node->run = ints ? run_int_subtract : doubles ? run_double_subtract : run_subtract; break;
+                case '*': node->run = ints ? run_int_multiply : doubles ? run_double_multiply : run_multiply; break;
                 case '/': node->run = run_divide; break;
                 case '%': node->run = run_remainder; break;
-                case '<': node->run = run_less; break;
-                case '>': node->run = run_greater; break;
-                case TK_LE: node->run = run_less_equal; break;
-                case TK_GE: node->run = run_greater_equal; break;
-                case TK_EQ: node->run = run_equal; break;
-                case TK_NE: node->run = run_not_equal; break;
+                case '<': node->run = ints ? run_int_less : doubles ? run_double_less : run_less; break;
+                case '>': node->run = ints ? run_int_greater : doubles ? run_double_greater : run_greater; break;
+                case TK_LE: node->run = ints ? run_int_less_equal : doubles ? run_double_less_equal : run_less_equal; break;
+                case TK_GE: node->run = ints ? run_int_greater_equal : doubles ? run_double_greater_equal : run_greater_equal; break;
+                case TK_EQ: node->run = ints ? run_int_equal : run_equal; break;
+                case TK_NE: node->run = ints ? run_int_not_equal : run_not_equal; break;
                 case '&': node->run = run_bit_and; break;
                 case '|': node->run = run_bit_or; break;
                 case '^': node->run = run_bit_xor; break;
@@ -2540,6 +2854,7 @@ void runtime_prepare(Node *node) {
             if (op == TK_INCREMENT || op == TK_DECREMENT) {
                 if (type_is_scalar(local_type(node->left))) node->run = run_step_local;
             } else if (op == '*') node->run = run_dereference;
+            else if (op == '&' && node->kind == N_UNARY) node->run = run_address;
             else if (op == '-' || op == '+' || op == '!' || op == '~') node->run = run_unary;
             break;
         case N_INDEX: node->run = run_index; break;
@@ -2549,6 +2864,10 @@ void runtime_prepare(Node *node) {
         case N_CALL:
             if (node->nesting < 1) node->nesting = 1;
             node->run = run_call;
+            if (node->left && node->left->kind == N_NAME) {
+                node->simple = 1;
+                for (Node *a = node->right; a; a = a->next) ++node->simple;
+            }
             break;
         default: break;
     }
@@ -2560,6 +2879,7 @@ void runtime_prepare(Node *node) {
         node->fetch = FETCH_ARRAY;
         return;
     }
+    if (node->kind == N_NAME && type_is_scalar(type)) node->type = type;
     node->fetch = node->kind == N_VALUE ? FETCH_CONSTANT : node->kind != N_NAME || !type_is_scalar(type) ? FETCH_EVALUATE
                 : type == CT_INT ? FETCH_INT : type == CT_DOUBLE ? FETCH_DOUBLE : type == CT_CHAR ? FETCH_CHAR
                 : type == CT_UCHAR ? FETCH_UCHAR

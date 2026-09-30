@@ -11,10 +11,10 @@ option(CT_FUZZER "Build the fuzz target with libFuzzer instead of the generated 
 option(CT_REPRODUCIBLE "Strip build paths from the output so that builds are reproducible" ON)
 option(CT_REPRODUCIBLE_TEST "Verify reproducibility by building the core library twice" OFF)
 
-add_library(cterpreter_core src/lexer.c src/parser.c src/interpreter.c src/memory.c src/builtins.c src/preprocessor.c src/types.c src/optimizer.c)
+add_library(cterpreter_core src/lexer.c src/parser.c src/interpreter.c src/memory.c src/builtins.c src/preprocessor.c src/types.c src/optimizer.c src/bridge.c src/boot.c src/config.c src/terminal.c)
 target_include_directories(cterpreter_core PUBLIC include PRIVATE src)
 
-add_executable(Cterpreter main.c src/terminal.c src/boot.c src/config.c)
+add_executable(Cterpreter main.c)
 target_include_directories(Cterpreter PRIVATE src)
 target_link_libraries(Cterpreter PRIVATE cterpreter_core)
 
@@ -38,6 +38,8 @@ if(BUILD_TESTING)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND AND UNIX)
         add_test(NAME cli COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli.py $<TARGET_FILE:Cterpreter>)
+        add_test(NAME self_host COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/self_host.py
+                 $<TARGET_FILE:Cterpreter> ${CMAKE_CURRENT_SOURCE_DIR})
     endif()
     add_executable(core_smoke tests/core_smoke.c)
     target_link_libraries(core_smoke PRIVATE cterpreter_core)

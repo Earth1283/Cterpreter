@@ -46,6 +46,16 @@ struct Node {
     int fetch;
     /* N_BLOCK: declares nothing and cannot create temporaries, so it needs no scope. */
     int bare;
+    /* N_FUNCTION: its parameter count plus one when a call needs neither an argument
+     * frame nor addressable parameters, and returns a scalar or nothing; else zero. */
+    int simple;
+    CtType returns;
+    /* A private declaration's place among its function's, counted from one; on the
+     * function, how many there are. Each activation keeps them in a frame. */
+    int slot;
+    /* Where that place is within a frame, on the declaration and on each name that uses it. */
+    unsigned frame_offset;
+    struct Frame *spare_frames; /* N_FUNCTION: frames of finished activations, ready for the next */
     /* The evaluator chosen for this node's shape before execution; NULL means the general one. */
     CtValue (*run)(CtInterpreter *interpreter, Node *node);
     /* The same for a statement, returning its control flow. */
@@ -75,6 +85,11 @@ struct Node {
             int shape;
             size_t size, align;
         } access;
+        /* N_CALL through a pointer variable: the defined function last found at an address. */
+        struct {
+            uint64_t address;
+            Node *function;
+        } callee;
         CtValue constant;   /* N_CASE: the label value, once N_SWITCH is cached */
         CtType static_type; /* N_CONDITIONAL, once cached */
     } cache;

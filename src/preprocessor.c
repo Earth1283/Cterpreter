@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #define PP_DEPTH 64
 
@@ -530,7 +531,7 @@ static char *header_definitions(const char *header) {
                      "#define assert(e) ((e) || __assert_fail(#e, __FILE__, __LINE__))\n#endif\n"
                      "#define static_assert _Static_assert\n"},
         {"limits.h", NULL}, {"float.h", NULL}, {"time.h", NULL}, {"errno.h", NULL}, {"stdint.h", NULL},
-        {"inttypes.h", NULL}, {"signal.h", NULL}
+        {"inttypes.h", NULL}, {"signal.h", NULL}, {"unistd.h", NULL}
     };
     char generated[2048] = "";
     if (!strcmp(header, "limits.h"))
@@ -591,7 +592,8 @@ static char *header_definitions(const char *header) {
                                          *conversion, widths[i].width, widths[i].length, *conversion);
     } else if (!strcmp(header, "signal.h"))
         (void)snprintf(generated, sizeof generated,
-                       "#ifndef __CT_SIGNAL_H\n#define __CT_SIGNAL_H\ntypedef int sig_atomic_t;\n#endif\n"
+                       "#ifndef __CT_SIGNAL_H\n#define __CT_SIGNAL_H\ntypedef int sig_atomic_t;\ntypedef unsigned long sigset_t;\n"
+                       "struct sigaction { void (*sa_handler)(int); sigset_t sa_mask; int sa_flags; };\n#endif\n"
                        "#define SIGABRT %d\n#define SIGFPE %d\n#define SIGILL %d\n#define SIGINT %d\n"
                        "#define SIGSEGV %d\n#define SIGTERM %d\n",
                        SIGABRT, SIGFPE, SIGILL, SIGINT, SIGSEGV, SIGTERM);
@@ -599,7 +601,10 @@ static char *header_definitions(const char *header) {
         (void)snprintf(generated, sizeof generated,
                        "#define EDOM %d\n#define ERANGE %d\n#define EILSEQ %d\n#define ENOENT %d\n"
                        "#define EACCES %d\n#define EINVAL %d\n#define ENOMEM %d\n#define EEXIST %d\n"
-                       "#define EIO %d\n", EDOM, ERANGE, EILSEQ, ENOENT, EACCES, EINVAL, ENOMEM, EEXIST, EIO);
+                       "#define EIO %d\n#define EINTR %d\n", EDOM, ERANGE, EILSEQ, ENOENT, EACCES, EINVAL, ENOMEM, EEXIST, EIO, EINTR);
+    else if (!strcmp(header, "unistd.h"))
+        (void)snprintf(generated, sizeof generated, "#define STDIN_FILENO %d\n#define STDOUT_FILENO %d\n#define STDERR_FILENO %d\n",
+                       STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO);
     for (size_t i = 0; i < sizeof headers / sizeof headers[0]; ++i)
         if (!strcmp(header, headers[i].name))
             return copy(headers[i].body ? headers[i].body : generated,
@@ -641,17 +646,25 @@ static void include(Expansion *expansion, const char *source, Text *output, unsi
         free(header);
         return;
     }
+    /* A project keeps its headers beside, or one level from, the file that includes them. */
+    static const char *const search[] = {"", "include/", "src/", "../include/", "../src/"};
     char filename[4096];
     const char *slash = strrchr(expansion->file, '/');
     size_t directory = slash ? (size_t)(slash - expansion->file + 1) : 0;
     if (header[0] == '/') directory = 0;
-    if (directory + strlen(header) >= sizeof filename) { fail(expansion, "include path is too long"); free(header); return; }
-    memcpy(filename, expansion->file, directory);
-    strcpy(filename + directory, header);
+    FILE *file = NULL;
+    for (size_t i = 0; i < sizeof search / sizeof search[0] && !file; ++i) {
+        size_t prefix = header[0] == '/' ? 0 : strlen(search[i]);
+        if (i && header[0] == '/') break;
+        if (directory + prefix + strlen(header) >= sizeof filename) { fail(expansion, "include path is too long"); free(header); return; }
+        memcpy(filename, expansion->file, directory);
+        memcpy(filename + directory, search[i], prefix);
+        strcpy(filename + directory + prefix, header);
+        for (size_t once = 0; once < expansion->preprocessor->once_count; ++once)
+            if (!strcmp(expansion->preprocessor->once[once], filename)) { free(header); return; }
+        file = fopen(filename, "rb");
+    }
     free(header);
-    for (size_t i = 0; i < expansion->preprocessor->once_count; ++i)
-        if (!strcmp(expansion->preprocessor->once[i], filename)) return;
-    FILE *file = fopen(filename, "rb");
     if (!file) { fail(expansion, "could not open included file"); return; }
     Text content = {0};
     char buffer[4096];

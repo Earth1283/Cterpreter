@@ -106,7 +106,24 @@ Files and piped source run `main` automatically when it exists. Both `int main(v
 ./build/Cterpreter -e 'interpret("examples/basics/hello.c");'
 ```
 
-This is nesting, not self-interpretation. Cterpreter can parse and load every file of its own interpreter core, but it cannot yet run itself: the command-line front end needs POSIX headers, and there is no way to link several source files into one program.
+## Running itself
+
+Cterpreter runs its own front end. `main.c` is the REPL and command-line program, and it loads and runs under the interpreter it is part of:
+
+```sh
+./build/Cterpreter
+c> .load main.c
+  Cterpreter  0.4.0
+c> 1 + 2
+3
+c> .depth
+Interpreter nesting level 1
+c> .quit
+```
+
+`.load` runs `main` when the loaded file defines one, as `Cterpreter file.c` does. `./build/Cterpreter main.c [options]` does the same from the shell, and the options reach the inner front end. The inner front end has its own prompt, history, hints, completion, `.config`, and Ctrl+C, and it can load `main.c` again to go one level deeper, up to `--max-nesting`. A nested front end shares the outer one's step and frame budget, so a long session inside one wants a larger `--max-steps`.
+
+What runs interpreted is the front end itself: option parsing, the REPL loop, every `.` command, the syntax tips, hints, and `.config`. What runs natively is the engine below `ct_create`, `ct_eval` and the rest of `cterpreter.h`, plus `boot_verify`, the `config_*` functions and `terminal_*`. A program that declares those functions gets the native implementations, exactly as it gets `printf`; each `ct_create` makes a real child interpreter, as `interpret()` does. The interpreter core itself still cannot be linked into an interpreted program, and a `sigaction` handler runs at the next safe point rather than asynchronously.
 
 ## Implemented language and runtime
 

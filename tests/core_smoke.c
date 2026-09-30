@@ -101,6 +101,27 @@ int main(void) {
     check(a, "char word[] = \"abc\"; int length_of(const char *s) { int m = 0; while (*s++) m++; return m; } length_of(word)", CT_OK, 3);
     check(a, "long big = 3000000000; size_t few = 5; unsigned char small = 250; small += 10; (int)(big / 1000000 + few + small)", CT_OK, 3009);
     check(a, "int climb(int m) { return m ? climb(m - 1) + 1 : 0; } climb(100000)", CT_ERROR, 0);
+    check(a, "int thrice(int v) { return v * 3; } int (*chosen)(int) = twice;"
+             "int both(void) { int m = 0; for (int i = 0; i < 4; i++) { m += chosen(i); chosen = i % 2 ? twice : thrice; } return m; } both()", CT_OK, 16);
+    check(a, "int later(int v); int (*pending)(int) = later; int relay(int v) { return pending(v); } relay(1)", CT_ERROR, 0);
+    check(a, "int later(int v) { return v + 40; } relay(2)", CT_OK, 42);
+    check(a, "int mask(int v) { int v2 = v; { int v = 5; v2 += v; } return v ? v2 + mask(v - 1) : v2; } mask(3)", CT_OK, 26);
+    check(a, "double halve(double d) { return d / 2; } int narrow(int v) { return v; } narrow(halve(9))", CT_OK, 4);
+    check(a, "twice(1, 2)", CT_ERROR, 0);
+    check(a, "int nine(int a, int b, int c, int d, int e, int f, int g, int h, int i) { return a + b + c + d + e + f + g + h + i; }"
+             "nine(1, 2, 3, 4, 5, 6, 7, 8, 9)", CT_OK, 45);
+    check(a, "int edge(int v) { return v + 1; } edge(2147483647)", CT_ERROR, 0);
+    check(a, "void quiet(int v) { if (v) return; } int after(int v) { quiet(v); return v - 1; } after(8)", CT_OK, 7);
+    check(a, "int square(int v) { int r = v * v; return r; } square(square(3)) + square(2)", CT_OK, 85);
+    check(a, "int keeps(int v) { int mine = v; if (v) keeps(v - 1); return mine; } keeps(5)", CT_OK, 5);
+    check(a, "int stale(int m) { int s = 0; for (int i = 0; i < m; i++) { int t; if (i == 0) t = 5; s += t; } return s; } stale(1)", CT_OK, 5);
+    check(a, "stale(2)", CT_ERROR, 0);
+    check(a, "double area(double w, double h) { double r = w * h; return r > 10.0 ? r - 1.0 : r + 1.0; } (int)area(3, 4)", CT_OK, 11);
+    check(a, "double grow(double d) { double big = 1e308; return d * big; } (int)(grow(0.5) / 1e307)", CT_OK, 5);
+    check(a, "(int)grow(10)", CT_ERROR, 0);
+    check(a, "char cells[4]; int fill(int m) { for (int i = 0; i < m; i++) cells[i] = i + 65; return cells[2]; } fill(4)", CT_OK, 67);
+    check(a, "fill(5)", CT_ERROR, 0);
+    check(a, "int ordered(int v, int w) { return v * 10 + w; } int ticks = 0; int advance(void) { return ++ticks; } ordered(advance(), advance())", CT_OK, 12);
     ct_clear(a);
     check(a, "x", CT_ERROR, 0);
     ct_destroy(a);

@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "runtime.h"
 
 #include <ctype.h>
@@ -9,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #define CHAR_POINTER type_pointer(CT_CHAR)
 #define VOID_POINTER type_pointer(CT_VOID)
@@ -50,7 +53,9 @@ enum {
     BI_FMOD, BI_FMIN, BI_FMAX, BI_FDIM, BI_COPYSIGN, BI_TIME, BI_DIFFTIME, BI_CLOCK, BI_ISDIGIT,
     BI_ISALPHA, BI_ISALNUM, BI_ISSPACE, BI_ISUPPER, BI_ISLOWER, BI_ISPUNCT, BI_ISPRINT, BI_ISGRAPH,
     BI_ISCNTRL, BI_ISXDIGIT, BI_ISBLANK, BI_TOUPPER, BI_TOLOWER, BI_ASSERT_FAIL, BI_INTERPRET, BI_INTERPRET_DEPTH,
-    BI_COUNT
+    BI_STRTOLL, BI_STRTOUL, BI_STRTOULL, BI_ISATTY, BI_SIGACTION, BI_SIGEMPTYSET,
+    BI_BRIDGE,
+    BI_COUNT = BI_BRIDGE + BR_COUNT
 };
 
 static const Signature signatures[] = {
@@ -182,7 +187,48 @@ static const Signature signatures[] = {
     [BI_TOLOWER] = {"tolower", RT_INT, 1, "int character"},
     [BI_ASSERT_FAIL] = {"__assert_fail", RT_INT, 3, "const char *expression, const char *file, int line"},
     [BI_INTERPRET] = {"interpret", RT_INT, 1, "const char *path"},
-    [BI_INTERPRET_DEPTH] = {"interpret_depth", RT_INT, 0, "void"}
+    [BI_INTERPRET_DEPTH] = {"interpret_depth", RT_INT, 0, "void"},
+    [BI_STRTOLL] = {"strtoll", RT_LONG, 3, "const char *text, char **end, int base"},
+    [BI_STRTOUL] = {"strtoul", RT_ULONG, 3, "const char *text, char **end, int base"},
+    [BI_STRTOULL] = {"strtoull", RT_ULONG, 3, "const char *text, char **end, int base"},
+    [BI_ISATTY] = {"isatty", RT_INT, 1, "int descriptor"},
+    [BI_SIGACTION] = {"sigaction", RT_INT, 3, "int signal, const struct sigaction *action, struct sigaction *previous"},
+    [BI_SIGEMPTYSET] = {"sigemptyset", RT_INT, 1, "sigset_t *set"},
+    [BI_BRIDGE + BR_CT_CREATE] = {"ct_create", RT_VOID_POINTER, 0, "void"},
+    [BI_BRIDGE + BR_CT_DESTROY] = {"ct_destroy", RT_VOID, 1, "CtInterpreter *interpreter"},
+    [BI_BRIDGE + BR_CT_CLEAR] = {"ct_clear", RT_VOID, 1, "CtInterpreter *interpreter"},
+    [BI_BRIDGE + BR_CT_SET_INTERRUPT] = {"ct_set_interrupt", RT_VOID, 2, "CtInterpreter *interpreter, const volatile sig_atomic_t *flag"},
+    [BI_BRIDGE + BR_CT_SET_FILENAME] = {"ct_set_filename", RT_VOID, 2, "CtInterpreter *interpreter, const char *filename"},
+    [BI_BRIDGE + BR_CT_SET_LIMITS] = {"ct_set_limits", RT_VOID, 3, "CtInterpreter *interpreter, size_t steps, unsigned depth"},
+    [BI_BRIDGE + BR_CT_SET_NESTING] = {"ct_set_nesting", RT_VOID, 3, "CtInterpreter *interpreter, unsigned level, unsigned limit"},
+    [BI_BRIDGE + BR_CT_SET_STRICT] = {"ct_set_strict", RT_VOID, 2, "CtInterpreter *interpreter, int strict"},
+    [BI_BRIDGE + BR_CT_EXIT_STATUS] = {"ct_exit_status", RT_INT, 2, "CtInterpreter *interpreter, int *status"},
+    [BI_BRIDGE + BR_CT_HAS_FUNCTION] = {"ct_has_function", RT_INT, 2, "CtInterpreter *interpreter, const char *name"},
+    [BI_BRIDGE + BR_CT_RUN_MAIN] = {"ct_run_main", RT_INT, 5, "CtInterpreter *interpreter, int argc, const char *const *argv, int *exit_status, CtError *error"},
+    [BI_BRIDGE + BR_CT_INSPECT_TYPE] = {"ct_inspect_type", RT_INT, 4, "CtInterpreter *interpreter, const char *source, CtType *type, CtError *error"},
+    [BI_BRIDGE + BR_CT_DUMP_AST] = {"ct_dump_ast", RT_INT, 4, "CtInterpreter *interpreter, const char *source, FILE *output, CtError *error"},
+    [BI_BRIDGE + BR_CT_DUMP] = {"ct_dump", RT_VOID, 2, "CtInterpreter *interpreter, FILE *output"},
+    [BI_BRIDGE + BR_CT_CHECK] = {"ct_check", RT_INT, 3, "CtInterpreter *interpreter, const char *source, CtError *error"},
+    [BI_BRIDGE + BR_CT_SIGNATURE] = {"ct_signature", RT_INT, 5, "CtInterpreter *interpreter, const char *name, size_t length, char *buffer, size_t capacity"},
+    [BI_BRIDGE + BR_CT_COMPLETE] = {"ct_complete", RT_INT, 6, "CtInterpreter *interpreter, const char *prefix, size_t length, size_t index, char *buffer, size_t capacity"},
+    [BI_BRIDGE + BR_CT_TYPE_NAME] = {"ct_type_name", RT_VOID, 3, "CtType type, char *buffer, size_t capacity"},
+    [BI_BRIDGE + BR_CT_TYPE_SIZE] = {"ct_type_size", RT_ULONG, 1, "CtType type"},
+    [BI_BRIDGE + BR_CT_EVAL] = {"ct_eval", RT_INT, 5, "CtInterpreter *interpreter, const char *source, CtValue *result, int *has_result, CtError *error"},
+    [BI_BRIDGE + BR_CT_FORMAT_VALUE] = {"ct_format_value", RT_VOID, 3, "CtValue value, char *buffer, size_t capacity"},
+    [BI_BRIDGE + BR_CT_PRINT_VALUE] = {"ct_print_value", RT_VOID, 4, "CtInterpreter *interpreter, CtValue value, char *buffer, size_t capacity"},
+    [BI_BRIDGE + BR_CT_DEPTH] = {"ct_depth", RT_INT, 1, "CtInterpreter *interpreter"},
+    [BI_BRIDGE + BR_BOOT_VERIFY] = {"boot_verify", RT_INT, 0, "void"},
+    [BI_BRIDGE + BR_CONFIG_DEFAULTS] = {"config_defaults", RT_VOID, 1, "CliConfig *config"},
+    [BI_BRIDGE + BR_CONFIG_INDEX] = {"config_index", RT_INT, 1, "const char *name"},
+    [BI_BRIDGE + BR_CONFIG_NAME] = {"config_name", RT_CHAR_POINTER, 1, "int index"},
+    [BI_BRIDGE + BR_CONFIG_VALUE] = {"config_value", RT_CHAR_POINTER, 2, "const CliConfig *config, int index"},
+    [BI_BRIDGE + BR_CONFIG_DESCRIPTION] = {"config_description", RT_CHAR_POINTER, 1, "int index"},
+    [BI_BRIDGE + BR_CONFIG_SET] = {"config_set", RT_INT, 3, "CliConfig *config, const char *name, const char *value"},
+    [BI_BRIDGE + BR_CONFIG_LOAD] = {"config_load", RT_INT, 3, "CliConfig *config, const char *path, int optional"},
+    [BI_BRIDGE + BR_CONFIG_SAVE] = {"config_save", RT_INT, 2, "const CliConfig *config, const char *path"},
+    [BI_BRIDGE + BR_TERMINAL_INIT] = {"terminal_init", RT_VOID, 3, "Terminal *terminal, const char *history_path, int color"},
+    [BI_BRIDGE + BR_TERMINAL_READ] = {"terminal_read", RT_CHAR_POINTER, 3, "Terminal *terminal, const char *prompt, const volatile sig_atomic_t *interrupted"},
+    [BI_BRIDGE + BR_TERMINAL_DESTROY] = {"terminal_destroy", RT_VOID, 1, "Terminal *terminal"}
 };
 
 _Static_assert(BI_COUNT == sizeof signatures / sizeof signatures[0], "builtin ids must match signatures");
@@ -304,6 +350,7 @@ static uint64_t pointer(CtInterpreter *interpreter, Token name, CtValue value) {
     return 0;
 }
 
+char *builtin_string(CtInterpreter *interpreter, Token name, CtValue value);
 static char *string(CtInterpreter *interpreter, Token name, CtValue value) {
     uint64_t address = pointer(interpreter, name, value);
     if (interpreter->failed) return NULL;
@@ -404,7 +451,19 @@ int builtin_value(CtInterpreter *interpreter, Token name, CtValue *value) {
     return 1;
 }
 
+char *builtin_string(CtInterpreter *interpreter, Token name, CtValue value) { return string(interpreter, name, value); }
+
+FILE *builtin_stream(CtInterpreter *interpreter, Token name, CtValue value) {
+    HostFile *file = find_file(interpreter, name, value);
+    return file ? file_stream(interpreter, file) : NULL;
+}
+
+CtValue builtin_copy_string(CtInterpreter *interpreter, Token name, const char *text) {
+    return copy_string(interpreter, name, text);
+}
+
 void builtin_cleanup(CtInterpreter *interpreter) {
+    bridge_cleanup(interpreter);
     while (interpreter->files) {
         HostFile *file = interpreter->files;
         interpreter->files = file->next;
@@ -991,7 +1050,7 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, size_t id,
     if (id >= BI_FOPEN && id <= BI_STRERROR) return file_call(interpreter, name, id, args);
     if ((id >= BI_STRLEN && id <= BI_STRPBRK) || (id >= BI_ATOI && id <= BI_ATOF)) goto string_functions;
     if (id >= BI_MEMCPY && id <= BI_MEMCHR) goto memory_functions;
-    if (id == BI_STRTOL || id == BI_STRTOD) goto number_conversion;
+    if (id == BI_STRTOL || id == BI_STRTOD || (id >= BI_STRTOLL && id <= BI_STRTOULL)) goto number_conversion;
     if (id == BI_STRTOK) goto tokenize;
     if (id == BI_QSORT || id == BI_BSEARCH) goto search_functions;
     if (id >= BI_ISDIGIT && id <= BI_TOLOWER) goto character_functions;
@@ -1003,6 +1062,16 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, size_t id,
         return integer((int)((interpreter->random_state / 65536u) % 32768u));
     }
     if (id == BI_ABORT) return runtime_error(interpreter, name, "the program called abort");
+    if (id == BI_ISATTY) return integer(isatty(small(interpreter, name, args[0])));
+    if (id == BI_SIGEMPTYSET) {
+        uint64_t set = pointer(interpreter, name, args[0]);
+        if (interpreter->failed) return integer(-1);
+        if (!memory_write(&interpreter->memory, set, integer_of(CT_ULONG, 0)))
+            return runtime_error(interpreter, name, interpreter->memory.error);
+        return integer(0);
+    }
+    if (id == BI_SIGACTION) return integer(bridge_sigaction(interpreter, name, args));
+    if (id >= BI_BRIDGE) return bridge_call(interpreter, name, id - BI_BRIDGE, args);
     if (id == BI_INTERPRET_DEPTH) return integer((int)interpreter->nesting);
     if (id == BI_INTERPRET) return interpret(interpreter, name, args[0]);
     if (id == BI_PUTS) {
@@ -1164,17 +1233,19 @@ memory_functions:
         return runtime_error(interpreter, name, message);
     }
 number_conversion:
-    if (id == BI_STRTOL || id == BI_STRTOD) {
+    if (id == BI_STRTOL || id == BI_STRTOD || id == BI_STRTOLL || id == BI_STRTOUL || id == BI_STRTOULL) {
         char *text = string(interpreter, name, args[0]);
-        int base = id == BI_STRTOL ? small(interpreter, name, args[2]) : 0;
+        int base = id == BI_STRTOD ? 0 : small(interpreter, name, args[2]);
         if (interpreter->failed) return integer(0);
-        if (id == BI_STRTOL && base != 0 && (base < 2 || base > 36))
-            return runtime_error(interpreter, name, "strtol requires a base of 0 or 2 through 36");
+        if (id != BI_STRTOD && base != 0 && (base < 2 || base > 36))
+            return runtime_error(interpreter, name, "integer conversion requires a base of 0 or 2 through 36");
         char *end = NULL;
         errno = 0;
         double real_result = 0;
         long integer_result = 0;
-        if (id == BI_STRTOL) integer_result = strtol(text, &end, base);
+        unsigned long unsigned_result = 0;
+        if (id == BI_STRTOL || id == BI_STRTOLL) integer_result = strtol(text, &end, base);
+        else if (id == BI_STRTOUL || id == BI_STRTOULL) unsigned_result = strtoul(text, &end, base);
         else real_result = strtod(text, &end);
         set_errno(interpreter, errno);
         uint64_t destination = pointer(interpreter, name, args[1]);
@@ -1184,6 +1255,7 @@ number_conversion:
                 return runtime_error(interpreter, name, interpreter->memory.error);
         }
         if (id == BI_STRTOD) return (CtValue){.type = CT_DOUBLE, .as.real = real_result};
+        if (id == BI_STRTOUL || id == BI_STRTOULL) return integer_of(CT_ULONG, (int64_t)unsigned_result);
         return integer_of(CT_LONG, integer_result);
     }
 tokenize:

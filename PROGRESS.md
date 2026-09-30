@@ -1,5 +1,19 @@
 # Misendeavor log
 
+## 2026-09-25 — Cterpreter runs Cterpreter
+
+`.load main.c` now works, and calling `main` afterwards starts a second Cterpreter inside the first. The parse-only milestone below listed two blockers: POSIX headers and a way to link several source files. The first was a day's work. The second I did not solve; I sidestepped it. Interpreting `interpreter.c` and its neighbours would put an interpreter under the interpreter at a few hundred times the cost, and every library call it makes would need a shim, so the engine stays native and the interpreted front end reaches it through `src/bridge.c`. The front end really is interpreted; the engine under `ct_eval` is not.
+
+- **Includes.** `"cterpreter.h"` lives in `include/` and `"boot.h"` in `src/`, so quoted includes fall back to those directories around the including file.
+- **Prototypes.** `cterpreter.h` declares `ct_create` and friends, and a declaration without a body used to shadow the library function of the same name ("function is declared but not defined"). It now falls through to the library, converts the result to the declared type, and for `BootCheck boot_verify(void)` returns into a temporary of the declared struct type.
+- **Handles.** An interpreter or terminal is a one-byte object in the caller's memory that maps to a native object. Discarding it, or clearing the caller, destroys the native side, so an unclosed child cannot leak.
+- **Structs.** `CtValue`, `CtError` and `CliConfig` cross as raw bytes, guarded by a size check against the interpreted declaration.
+- **Budgets.** A child gets the caller's remaining steps and frames whatever it asks for, and its nesting level is at least one deeper than the caller's. Without that clamp, `main.c` loading `main.c` would recurse until the host stack ran out; with it, the ninth level reports "nested interpreter limit exceeded".
+- **Terminal.** Hints and completions are interpreted functions called from the native line editor. The trampoline copies the line into interpreted memory, invokes the function through `runtime_invoke`, and copies the answer back.
+- **Ctrl+C.** `sigaction` installs a native forwarder that records the signal. The interpreted handler runs at the next builtin return or the next interrupt poll, and the terminal and child interpreters watch that record instead of the outer flag. That keeps the outer session alive when the inner one is interrupted.
+
+Caveat found on the way: the inner session's own reads cost steps of the outer one. Reading the 25 KB `main.c` a byte at a time costs about a million, the default limit, so `.load main.c` inside a nested session needs `--max-steps`.
+
 ## 2026-09-25 — 0.4.0: a pass before execution
 
 Profiling 0.3.1 showed the time spread thinly across generic machinery rather than concentrated anywhere. Every node went through the same switch, every operator dispatched on its operand types, and names were resolved again whenever a loop body opened a new scope. A trivial `for` loop cost about 1,570 host instructions per iteration. 0.4.0 adds a pass that runs over each submission after parsing and before execution, and uses what it learns to pick a specialized evaluator for each node. The benchmark set went from 3.35 s to 1.20 s, **2.8× faster**, with 2.63× fewer instructions.

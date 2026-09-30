@@ -181,7 +181,7 @@ typedef struct {
     Node **declared, **visible;
     size_t declared_count, declared_capacity, visible_count, visible_capacity;
     size_t scope_start; /* where the innermost scope's entries begin in visible */
-    int lexical, duplicated, failed;
+    int lexical, duplicated, starts_va, failed;
 } Binder;
 
 static int same_name(const Node *a, const Node *b) {
@@ -204,6 +204,7 @@ static void survey(Binder *binder, Node *node) {
         if ((node->kind == N_DECLARATION || node->kind == N_ENUMERATOR) && node->token.length)
             push(binder, &binder->declared, &binder->declared_count, &binder->declared_capacity, node);
         if (node->kind == N_GOTO || node->kind == N_LABEL) binder->lexical = 0;
+        if (node->kind == N_VA_START) binder->starts_va = 1;
         if (node->kind == N_SWITCH && node->right)
             for (Node *item = node->right->left; item; item = item->next)
                 if (item->kind == N_DECLARATION || item->kind == N_GROUP || item->kind == N_ENUMERATOR)
@@ -326,22 +327,40 @@ static void privatize(Binder *binder, Node *function) {
             parameter->resolution = RESOLVE_DYNAMIC;
             parameter->unaddressed = 0;
         }
+    function->slot = 0;
+    for (size_t i = 0; i < binder->declared_count; ++i)
+        if (binder->declared[i]->unaddressed == 1) binder->declared[i]->slot = ++function->slot;
+}
+
+/* va_start inspects the argument frame of the function it runs in, so a
+ * function that uses it needs one even when it is not variadic. */
+static void mark_simple(const Binder *binder, Node *function) {
+    CtType returns = type_target(function->type);
+    if (function->variadic || binder->starts_va || !(returns == CT_VOID || type_is_scalar(returns))) return;
+    int parameters = 0;
+    for (Node *parameter = function->left; parameter; parameter = parameter->next, ++parameters)
+        if (parameter->unaddressed != 1) return;
+    function->returns = returns;
+    function->simple = parameters + 1;
 }
 
 static void bind_function(Binder *binder, Node *function) {
     binder->declared_count = binder->visible_count = binder->scope_start = 0;
     binder->lexical = 1;
-    binder->duplicated = 0;
+    binder->duplicated = binder->starts_va = 0;
     survey(binder, function->left);
     survey(binder, function->right->left);
     /* The parameters and the body's outermost declarations share the call's scope. */
     for (Node *parameter = function->left; parameter; parameter = parameter->next) declare(binder, parameter);
     for (Node *item = function->right->left; item; item = item->next) bind_statement(binder, item);
     privatize(binder, function);
+    mark_simple(binder, function);
 }
 
 /* Whether evaluating anything here may create a temporary object in the
- * current scope. Nested blocks and for loops have scopes of their own. */
+ * current scope. Nested blocks and for loops have scopes of their own.
+ * A block that neither does that nor declares anything but private locals,
+ * which live in the frame, is bare. */
 static int makes_temporaries(const Node *node);
 
 static int any_makes_temporaries(const Node *list) {
@@ -359,7 +378,7 @@ static int makes_temporaries(const Node *node) {
 
 static void mark_bare(Node *block) {
     for (Node *item = block->left; item; item = item->next)
-        if (item->kind == N_DECLARATION || item->kind == N_GROUP || item->kind == N_ENUMERATOR ||
+        if ((item->kind == N_DECLARATION && !item->slot) || item->kind == N_GROUP || item->kind == N_ENUMERATOR ||
             item->kind == N_FUNCTION || makes_temporaries(item))
             return;
     block->bare = 1;
