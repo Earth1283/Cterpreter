@@ -181,6 +181,8 @@ Objects live in a table kept sorted by address, so a memory access is a binary s
 
 Strict Clang/GCC warnings are enabled. The test suite covers the lexer and parser directly, pins integer boundaries and conversions, fuzzes malformed input, and compares every example against the host compiler's own output. When Python 3 is available, CTest also tests preference persistence and the real terminal editor through a pseudo-terminal, including live toggles and narrow windows. CI is configured for GCC and Clang on Linux and Apple Clang on macOS; these hosted runs have not been executed in this workspace.
 
+The [performance suite](benchmarks/README.md) compares independent Cterpreter builds against equivalent Python programs, checks their output against native C, and saves raw timings for before/after comparisons.
+
 ```sh
 ctest --test-dir build --output-on-failure
 cmake -S . -B build/sanitize -DCT_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug

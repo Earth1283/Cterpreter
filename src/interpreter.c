@@ -407,6 +407,15 @@ static inline Symbol *resolve(CtInterpreter *interpreter, Node *node) {
     return resolve_again(scope, node);
 }
 
+int runtime_scalar_call(CtInterpreter *interpreter, Node *call_node) {
+    Node *callee = call_node->left;
+    if (!callee || callee->kind != N_NAME || callee->resolution != RESOLVE_GLOBAL) return 0;
+    Symbol *symbol = resolve(interpreter, callee);
+    if (!symbol || !symbol->function) return 0;
+    CtType type = type_target(symbol->function->type);
+    return type == CT_VOID || type_is_scalar(type);
+}
+
 /* A duplicate in the current scope is an error, unless the caller asks for it in *existing. */
 static Symbol *define(CtInterpreter *interpreter, Node *node, CtType type, Symbol **existing) {
     const Token *token = &node->token;
@@ -1771,7 +1780,7 @@ CtValue runtime_invoke(CtInterpreter *interpreter, Token name, CtValue pointer, 
 }
 
 /* A prototype for a library function decides the type of the result, and where an aggregate is returned. */
-static CtValue call_builtin(CtInterpreter *interpreter, const Token *name, size_t builtin, Node *prototype,
+static ALWAYS_INLINE CtValue call_builtin(CtInterpreter *interpreter, const Token *name, size_t builtin, Node *prototype,
                             const CtValue *values, size_t arguments) {
     CtType declared = prototype ? type_target(prototype->type) : CT_VOID;
     interpreter->result_slot = (CtValue){.type = CT_VOID};
@@ -2039,7 +2048,7 @@ static ALWAYS_INLINE int fetch(CtInterpreter *interpreter, Node *node, CtValue *
     return !interpreter->failed;
 }
 
-static inline CtValue operand(CtInterpreter *interpreter, Node *node) {
+static ALWAYS_INLINE CtValue operand(CtInterpreter *interpreter, Node *node) {
     CtValue value;
     (void)fetch(interpreter, node, &value);
     return value;
@@ -2145,12 +2154,80 @@ static ALWAYS_INLINE CtValue int_arithmetic(CtInterpreter *interpreter, Node *no
 INT_ARITHMETIC(add, '+')
 INT_ARITHMETIC(subtract, '-')
 INT_ARITHMETIC(multiply, '*')
+INT_ARITHMETIC(divide, '/')
+INT_ARITHMETIC(remainder, '%')
+INT_ARITHMETIC(bit_and, '&')
+INT_ARITHMETIC(bit_or, '|')
+INT_ARITHMETIC(bit_xor, '^')
 INT_ARITHMETIC(less, '<')
 INT_ARITHMETIC(greater, '>')
 INT_ARITHMETIC(less_equal, TK_LE)
 INT_ARITHMETIC(greater_equal, TK_GE)
 INT_ARITHMETIC(equal, TK_EQ)
 INT_ARITHMETIC(not_equal, TK_NE)
+
+/* Control flow needs only truth. Keep the comparison and its checked local
+ * loads together, rather than returning a CtValue through two dispatches. */
+static ALWAYS_INLINE int test_int(CtInterpreter *interpreter, Node *node, int op) {
+    Allocation *left = initialized_local(interpreter, node->left);
+    Node *other = node->right;
+    Allocation *right = other->kind == N_VALUE ? left : initialized_local(interpreter, other);
+    if (!left || !right) return truth(evaluate(interpreter, node));
+    if (!tick(interpreter, node)) return 0;
+    int a, b;
+    memcpy(&a, left->data, sizeof a);
+    if (other->kind == N_VALUE) b = (int)other->token.value.as.integer;
+    else memcpy(&b, right->data, sizeof b);
+    switch (op) {
+        case '<': return a < b;
+        case '>': return a > b;
+        case TK_LE: return a <= b;
+        case TK_GE: return a >= b;
+        case TK_EQ: return a == b;
+        default: return a != b;
+    }
+}
+
+#define TEST_INT(name, op) \
+    static int test_int_##name(CtInterpreter *interpreter, Node *node) { return test_int(interpreter, node, op); }
+TEST_INT(less, '<')
+TEST_INT(greater, '>')
+TEST_INT(less_equal, TK_LE)
+TEST_INT(greater_equal, TK_GE)
+TEST_INT(equal, TK_EQ)
+TEST_INT(not_equal, TK_NE)
+
+static inline int condition(CtInterpreter *interpreter, Node *node) {
+    return node->test ? node->test(interpreter, node) : truth(operand(interpreter, node));
+}
+
+/* Expressions whose operands are known ints, including nested arithmetic.
+ * Fetch each exactly once; if a runtime value differs, use the general
+ * operator with those values rather than evaluating their side effects again. */
+static ALWAYS_INLINE CtValue int_expression(CtInterpreter *interpreter, Node *node, int kind) {
+    CtValue left, right;
+    if (!fetch(interpreter, node->left, &left) || !fetch(interpreter, node->right, &right)) return integer(0);
+    if (left.type == CT_INT && right.type == CT_INT)
+        return int_binary(interpreter, &node->token, kind, left.as.integer, right.as.integer);
+    return binary(interpreter, kind, &node->token, left, right);
+}
+
+#define INT_EXPRESSION(name, kind) \
+    static CtValue run_int_expr_##name(CtInterpreter *interpreter, Node *node) { return int_expression(interpreter, node, kind); }
+INT_EXPRESSION(add, '+')
+INT_EXPRESSION(subtract, '-')
+INT_EXPRESSION(multiply, '*')
+INT_EXPRESSION(divide, '/')
+INT_EXPRESSION(remainder, '%')
+INT_EXPRESSION(bit_and, '&')
+INT_EXPRESSION(bit_or, '|')
+INT_EXPRESSION(bit_xor, '^')
+INT_EXPRESSION(less, '<')
+INT_EXPRESSION(greater, '>')
+INT_EXPRESSION(less_equal, TK_LE)
+INT_EXPRESSION(greater_equal, TK_GE)
+INT_EXPRESSION(equal, TK_EQ)
+INT_EXPRESSION(not_equal, TK_NE)
 
 /* The same for a double local. A result that is not finite is the general path's to report. */
 static ALWAYS_INLINE CtValue double_arithmetic(CtInterpreter *interpreter, Node *node, int kind) {
@@ -2184,6 +2261,41 @@ DOUBLE_ARITHMETIC(less, '<')
 DOUBLE_ARITHMETIC(greater, '>')
 DOUBLE_ARITHMETIC(less_equal, TK_LE)
 DOUBLE_ARITHMETIC(greater_equal, TK_GE)
+
+static ALWAYS_INLINE CtValue double_expression(CtInterpreter *interpreter, Node *node, int op) {
+    CtValue left, right;
+    if (!fetch(interpreter, node->left, &left) || !fetch(interpreter, node->right, &right)) return integer(0);
+    if (left.type != CT_DOUBLE || right.type != CT_DOUBLE)
+        return binary(interpreter, op, &node->token, left, right);
+    double a = left.as.real, b = right.as.real, value;
+    switch (op) {
+        case '+': value = a + b; break;
+        case '-': value = a - b; break;
+        case '*': value = a * b; break;
+        case '/': value = b == 0.0 ? NAN : a / b; break;
+        case '<': return integer(a < b);
+        case '>': return integer(a > b);
+        case TK_LE: return integer(a <= b);
+        case TK_GE: return integer(a >= b);
+        case TK_EQ: return integer(a == b);
+        default: return integer(a != b);
+    }
+    if (!isfinite(value)) return binary(interpreter, op, &node->token, left, right);
+    return (CtValue){.type = CT_DOUBLE, .as.real = value};
+}
+
+#define DOUBLE_EXPRESSION(name, op) \
+    static CtValue run_double_expr_##name(CtInterpreter *interpreter, Node *node) { return double_expression(interpreter, node, op); }
+DOUBLE_EXPRESSION(add, '+')
+DOUBLE_EXPRESSION(subtract, '-')
+DOUBLE_EXPRESSION(multiply, '*')
+DOUBLE_EXPRESSION(divide, '/')
+DOUBLE_EXPRESSION(less, '<')
+DOUBLE_EXPRESSION(greater, '>')
+DOUBLE_EXPRESSION(less_equal, TK_LE)
+DOUBLE_EXPRESSION(greater_equal, TK_GE)
+DOUBLE_EXPRESSION(equal, TK_EQ)
+DOUBLE_EXPRESSION(not_equal, TK_NE)
 
 static NOINLINE CtValue run_arithmetic(CtInterpreter *interpreter, Node *node) {
     return arithmetic(interpreter, node, node->token.kind);
@@ -2227,6 +2339,40 @@ ASSIGN_LOCAL(set_local, '=')
 ASSIGN_LOCAL(add_local, TK_ADD_ASSIGN)
 ASSIGN_LOCAL(subtract_local, TK_SUB_ASSIGN)
 ASSIGN_LOCAL(multiply_local, TK_MUL_ASSIGN)
+
+/* An int destination avoids generic scalar decoding, operator dispatch and
+ * encoding. Other right-hand types still use the usual conversion rules. */
+static ALWAYS_INLINE CtValue assign_int(CtInterpreter *interpreter, Node *node, int op) {
+    Symbol *symbol = local_symbol(interpreter, node->left);
+    Allocation *record = symbol ? symbol->object : NULL;
+    if (!record || symbol->is_const || record->readonly || (op != '=' && !record->fully_initialized))
+        return assignment(interpreter, node);
+    int old = 0;
+    if (op != '=') memcpy(&old, record->data, sizeof old);
+    CtValue value;
+    if (!fetch(interpreter, node->right, &value)) return integer(0);
+    if (op != '=') {
+        value = value.type == CT_INT ? int_binary(interpreter, &node->token, op, old, value.as.integer)
+                                    : binary(interpreter, op, &node->token, integer(old), value);
+        if (interpreter->failed) return integer(0);
+    }
+    if (value.type != CT_INT) {
+        value = convert(interpreter, &node->token, value, CT_INT, 0);
+        if (interpreter->failed) return value;
+    }
+    int whole = (int)value.as.integer;
+    memcpy(record->data, &whole, sizeof whole);
+    record->fully_initialized = 1;
+    record->uninitialized = 0;
+    return value;
+}
+
+#define ASSIGN_INT(name, op) \
+    static CtValue run_##name##_int(CtInterpreter *interpreter, Node *node) { return assign_int(interpreter, node, op); }
+ASSIGN_INT(set_local, '=')
+ASSIGN_INT(add_local, '+')
+ASSIGN_INT(subtract_local, '-')
+ASSIGN_INT(multiply_local, '*')
 
 static CtValue run_update_local(CtInterpreter *interpreter, Node *node) {
     return assign_local(interpreter, node, node->token.kind);
@@ -2401,6 +2547,18 @@ static inline Node *pointed_function(CtInterpreter *interpreter, Node *node, con
     return function;
 }
 
+/* The builtin ID and arity of a direct call are already known. Its name is
+ * still resolved by run_call, so a later definition or a shadowing pointer
+ * takes the usual path before any argument is evaluated. */
+static NOINLINE CtValue call_known_builtin(CtInterpreter *interpreter, Node *node, Node *prototype) {
+    CtValue values[INLINE_ARGUMENTS];
+    size_t index = 0;
+    for (Node *a = node->right; a; a = a->next)
+        if (!fetch(interpreter, a, &values[index++])) return integer(0);
+    return call_builtin(interpreter, &node->left->token, (size_t)(node->builtin_id - 1), prototype,
+                        values, (size_t)(node->simple - 1));
+}
+
 static CtValue run_call(CtInterpreter *interpreter, Node *node) {
     unsigned charge = (unsigned)node->nesting;
     if (interpreter->depth + charge > interpreter->depth_limit)
@@ -2422,13 +2580,59 @@ static CtValue run_call(CtInterpreter *interpreter, Node *node) {
             if (frame) frame_give(function, frame);
             result = integer(0);
         }
-    } else result = call(interpreter, node);
+    } else if (node->builtin_id && node->simple && node->simple <= INLINE_ARGUMENTS + 1 &&
+               (!symbol || (symbol->function && !symbol->function->right)))
+        result = call_known_builtin(interpreter, node, symbol ? symbol->function : NULL);
+    else result = call(interpreter, node);
     interpreter->depth -= charge;
     return result;
 }
 
 static CtType local_type(const Node *name) {
     return name->kind == N_NAME && name->resolution == RESOLVE_LOCAL ? name->cache.use.declaration->type : CT_VOID;
+}
+
+/* Only shapes whose successful evaluation necessarily yields int. No global
+ * lookup or speculative type checking belongs in this pre-execution test. */
+static int int_shaped(const Node *node) {
+    switch (node->kind) {
+        case N_VALUE: return node->token.value.type == CT_INT;
+        case N_NAME: return local_type(node) == CT_INT;
+        case N_CAST: return node->type == CT_INT;
+        case N_UNARY: case N_POSTFIX:
+            if (node->token.kind == '!') return 1;
+            if (node->token.kind == '&' || node->token.kind == '*') return 0;
+            return int_shaped(node->left);
+        case N_BINARY:
+            if (is_assignment(node->token.kind)) return local_type(node->left) == CT_INT;
+            if (node->token.kind == TK_AND || node->token.kind == TK_OR) return 1;
+            return int_shaped(node->left) && int_shaped(node->right);
+        case N_INDEX: {
+            CtType type = local_type(node->left);
+            return (type_is_array(type) || type_is_pointer(type)) && type_target(type) == CT_INT;
+        }
+        default: return 0;
+    }
+}
+
+static int double_shaped(const Node *node) {
+    switch (node->kind) {
+        case N_VALUE: return node->token.value.type == CT_DOUBLE;
+        case N_NAME: return local_type(node) == CT_DOUBLE;
+        case N_CAST: return node->type == CT_DOUBLE;
+        case N_UNARY: case N_POSTFIX:
+            return (node->token.kind == '+' || node->token.kind == '-' || node->token.kind == TK_INCREMENT ||
+                    node->token.kind == TK_DECREMENT) && double_shaped(node->left);
+        case N_BINARY:
+            if (is_assignment(node->token.kind)) return local_type(node->left) == CT_DOUBLE;
+            return (node->token.kind == '+' || node->token.kind == '-' || node->token.kind == '*' ||
+                    node->token.kind == '/') && double_shaped(node->left) && double_shaped(node->right);
+        case N_INDEX: {
+            CtType type = local_type(node->left);
+            return (type_is_array(type) || type_is_pointer(type)) && type_target(type) == CT_DOUBLE;
+        }
+        default: return 0;
+    }
 }
 
 static Flow scoped(CtInterpreter *interpreter, Node *node) {
@@ -2559,6 +2763,7 @@ static void declare_function(CtInterpreter *interpreter, Node *node) {
     if (!symbol->function || node->right) symbol->function = node;
     FunctionRef *reference = function_reference(interpreter, symbol->address);
     if (reference && (!reference->definition || node->right)) reference->definition = symbol->function;
+    if (node->right) optimize_function_scopes(interpreter, node);
 }
 
 static int perform_expression(CtInterpreter *interpreter, Node *node) {
@@ -2629,8 +2834,7 @@ static int perform_block(CtInterpreter *interpreter, Node *node) {
 }
 
 static int perform_if(CtInterpreter *interpreter, Node *node) {
-    CtValue condition = operand(interpreter, node->left);
-    Node *branch = truth(condition) ? node->right : node->third;
+    Node *branch = condition(interpreter, node->left) ? node->right : node->third;
     if (!interpreter->failed && branch) return scoped(interpreter, branch);
     return FLOW_NORMAL;
 }
@@ -2662,13 +2866,13 @@ static int perform_do(CtInterpreter *interpreter, Node *node) {
         flow = scoped(interpreter, node->right);
         if (interpreter->failed || interpreter->exit_requested || flow == FLOW_RETURN ||
             flow == FLOW_GOTO || flow == FLOW_BREAK) break;
-    } while (truth(operand(interpreter, node->left)));
+    } while (condition(interpreter, node->left));
     return flow == FLOW_RETURN || flow == FLOW_GOTO ? flow : FLOW_NORMAL;
 }
 
 static int perform_while(CtInterpreter *interpreter, Node *node) {
     Flow flow = FLOW_NORMAL;
-    while (!interpreter->failed && !interpreter->exit_requested && truth(operand(interpreter, node->left))) {
+    while (!interpreter->failed && !interpreter->exit_requested && condition(interpreter, node->left)) {
         if (interpreter->failed) break;
         flow = scoped(interpreter, node->right);
         if (flow == FLOW_RETURN || flow == FLOW_GOTO || flow == FLOW_BREAK) break;
@@ -2683,7 +2887,7 @@ static int perform_for(CtInterpreter *interpreter, Node *node) {
     interpreter->scope = &scope;
     if (node->left) (void)execute(interpreter, node->left);
     while (!interpreter->failed && !interpreter->exit_requested) {
-        if (node->right && !truth(operand(interpreter, node->right))) break;
+        if (node->right && !condition(interpreter, node->right)) break;
         if (interpreter->failed) break;
         flow = scoped(interpreter, node->fourth);
         if (flow == FLOW_RETURN || flow == FLOW_GOTO || flow == FLOW_BREAK || interpreter->failed) break;
@@ -2821,6 +3025,10 @@ void runtime_prepare(Node *node) {
                 else if (place->kind == N_MEMBER) node->run = run_assign_member;
                 else if (place->kind == N_UNARY && place->token.kind == '*') node->run = run_assign_dereference;
                 else if (!type_is_scalar(local_type(place))) node->run = run_assignment;
+                else if (local_type(place) == CT_INT &&
+                         (op == '=' || op == TK_ADD_ASSIGN || op == TK_SUB_ASSIGN || op == TK_MUL_ASSIGN))
+                    node->run = op == '=' ? run_set_local_int : op == TK_ADD_ASSIGN ? run_add_local_int
+                                : op == TK_SUB_ASSIGN ? run_subtract_local_int : run_multiply_local_int;
                 else node->run = op == '=' ? run_set_local : op == TK_ADD_ASSIGN ? run_add_local
                                : op == TK_SUB_ASSIGN ? run_subtract_local : op == TK_MUL_ASSIGN ? run_multiply_local
                                : run_update_local;
@@ -2831,23 +3039,68 @@ void runtime_prepare(Node *node) {
                 pair != (node->right->kind == N_VALUE ? node->right->token.value.type : local_type(node->right)))
                 pair = CT_VOID;
             int ints = pair == CT_INT, doubles = pair == CT_DOUBLE;
+            if (ints) {
+                switch (op) {
+                    case '<': node->test = test_int_less; break;
+                    case '>': node->test = test_int_greater; break;
+                    case TK_LE: node->test = test_int_less_equal; break;
+                    case TK_GE: node->test = test_int_greater_equal; break;
+                    case TK_EQ: node->test = test_int_equal; break;
+                    case TK_NE: node->test = test_int_not_equal; break;
+                    default: break;
+                }
+            }
             switch (op) {
                 case '+': node->run = ints ? run_int_add : doubles ? run_double_add : run_add; break;
                 case '-': node->run = ints ? run_int_subtract : doubles ? run_double_subtract : run_subtract; break;
                 case '*': node->run = ints ? run_int_multiply : doubles ? run_double_multiply : run_multiply; break;
-                case '/': node->run = run_divide; break;
-                case '%': node->run = run_remainder; break;
+                case '/': node->run = ints ? run_int_divide : run_divide; break;
+                case '%': node->run = ints ? run_int_remainder : run_remainder; break;
                 case '<': node->run = ints ? run_int_less : doubles ? run_double_less : run_less; break;
                 case '>': node->run = ints ? run_int_greater : doubles ? run_double_greater : run_greater; break;
                 case TK_LE: node->run = ints ? run_int_less_equal : doubles ? run_double_less_equal : run_less_equal; break;
                 case TK_GE: node->run = ints ? run_int_greater_equal : doubles ? run_double_greater_equal : run_greater_equal; break;
                 case TK_EQ: node->run = ints ? run_int_equal : run_equal; break;
                 case TK_NE: node->run = ints ? run_int_not_equal : run_not_equal; break;
-                case '&': node->run = run_bit_and; break;
-                case '|': node->run = run_bit_or; break;
-                case '^': node->run = run_bit_xor; break;
+                case '&': node->run = ints ? run_int_bit_and : run_bit_and; break;
+                case '|': node->run = ints ? run_int_bit_or : run_bit_or; break;
+                case '^': node->run = ints ? run_int_bit_xor : run_bit_xor; break;
                 case TK_AND: case TK_OR: node->run = run_logical; break;
                 default: node->run = run_arithmetic; break;
+            }
+            if (!ints && int_shaped(node->left) && int_shaped(node->right)) {
+                switch (op) {
+                    case '+': node->run = run_int_expr_add; break;
+                    case '-': node->run = run_int_expr_subtract; break;
+                    case '*': node->run = run_int_expr_multiply; break;
+                    case '/': node->run = run_int_expr_divide; break;
+                    case '%': node->run = run_int_expr_remainder; break;
+                    case '&': node->run = run_int_expr_bit_and; break;
+                    case '|': node->run = run_int_expr_bit_or; break;
+                    case '^': node->run = run_int_expr_bit_xor; break;
+                    case '<': node->run = run_int_expr_less; break;
+                    case '>': node->run = run_int_expr_greater; break;
+                    case TK_LE: node->run = run_int_expr_less_equal; break;
+                    case TK_GE: node->run = run_int_expr_greater_equal; break;
+                    case TK_EQ: node->run = run_int_expr_equal; break;
+                    case TK_NE: node->run = run_int_expr_not_equal; break;
+                    default: break;
+                }
+            }
+            if (!doubles && double_shaped(node->left) && double_shaped(node->right)) {
+                switch (op) {
+                    case '+': node->run = run_double_expr_add; break;
+                    case '-': node->run = run_double_expr_subtract; break;
+                    case '*': node->run = run_double_expr_multiply; break;
+                    case '/': node->run = run_double_expr_divide; break;
+                    case '<': node->run = run_double_expr_less; break;
+                    case '>': node->run = run_double_expr_greater; break;
+                    case TK_LE: node->run = run_double_expr_less_equal; break;
+                    case TK_GE: node->run = run_double_expr_greater_equal; break;
+                    case TK_EQ: node->run = run_double_expr_equal; break;
+                    case TK_NE: node->run = run_double_expr_not_equal; break;
+                    default: break;
+                }
             }
             break;
         case N_UNARY: case N_POSTFIX:

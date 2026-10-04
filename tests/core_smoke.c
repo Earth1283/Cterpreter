@@ -95,6 +95,20 @@ int main(void) {
     check(a, "int shade(int n) { int v = n; { int v = n * 10; if (n) return v + shade(n - 1); } return v; } shade(3)", CT_OK, 60);
     check(a, "int outer = 5; int peek(void) { int seen_first = outer; int outer = 1; return seen_first + outer; } peek()", CT_OK, 6);
     check(a, "int unset(void) { int u; return u + 1; } unset()", CT_ERROR, 0);
+    /* Scalar calls may discard their caller's empty scope, but their arguments
+     * and indirect callees can still need aggregate temporaries. */
+    check(a, "int take_point(struct Point p) { return p.x + p.y; }"
+             "int point_arg(void) { return take_point((struct Point){20, 22}); } point_arg()", CT_OK, 42);
+    check(a, "int take_shift(void) { return take_point(shift((struct Point){20, 21})); } take_shift()", CT_OK, 42);
+    check(a, "struct Point (*point_fn)(struct Point) = shift;"
+             "int indirect_point(void) { return point_fn((struct Point){20, 21}).x; } indirect_point()", CT_OK, 21);
+    check(a, "int later_scalar(int); int forward_scalar(int n) { return later_scalar(n); }"
+             "int later_scalar(int n) { return n + 1; } forward_scalar(41)", CT_OK, 42);
+    check(a, "struct Point *temp_point; int hold_point(struct Point *p) { temp_point = p; return p->x; }"
+             "int point_lifetime(void) { int v = hold_point(&(struct Point){42, 0}); return v + temp_point->y; }"
+             "point_lifetime()", CT_OK, 42);
+    check(a, "temp_point->x", CT_ERROR, 0);
+    check(a, "int recurse_scalar(int n) { if (n < 2) return n; return recurse_scalar(n - 1) + recurse_scalar(n - 2); } recurse_scalar(10)", CT_OK, 55);
     check(a, "int through(void) { int t; int *q = &t; *q = 4; return t; } through()", CT_OK, 4);
     check(a, "int *escaped; int leak(void) { int gone = 3; escaped = &gone; return gone; } leak(); *escaped", CT_ERROR, 0);
     check(a, "int jumpy(int m) { if (0) return -1; goto skip; return 0; skip: while (0) m = 0; return m * 2; } jumpy(21)", CT_OK, 42);
@@ -122,6 +136,14 @@ int main(void) {
     check(a, "char cells[4]; int fill(int m) { for (int i = 0; i < m; i++) cells[i] = i + 65; return cells[2]; } fill(4)", CT_OK, 67);
     check(a, "fill(5)", CT_ERROR, 0);
     check(a, "int ordered(int v, int w) { return v * 10 + w; } int ticks = 0; int advance(void) { return ++ticks; } ordered(advance(), advance())", CT_OK, 12);
+    check(a, "int cached_abs(int n) { return abs(n); } cached_abs(-3) + cached_abs(-4)", CT_OK, 7);
+    check(a, "int abs(int n) { return n + 100; } cached_abs(3)", CT_OK, 103);
+    check(a, "int digit_override(int n) { return n + 2; }"
+             "int cached_digit(int n) { return isdigit(n) != 0; } cached_digit(48)", CT_OK, 1);
+    check(a, "int (*isdigit)(int) = digit_override; cached_digit(-2)", CT_OK, 0);
+    check(a, "int cached_shadow(int n) { int sum = labs(n); int (*labs)(int) = digit_override; return sum + labs(n); }"
+             "cached_shadow(3) + cached_shadow(4)", CT_OK, 18);
+    check(a, "int native_twice(void) { int i = 1; return (int)labs(i++) + (int)labs(i++) + i * 100; } native_twice()", CT_OK, 303);
     ct_clear(a);
     check(a, "x", CT_ERROR, 0);
     ct_destroy(a);

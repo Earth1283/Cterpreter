@@ -132,6 +132,8 @@ CtValue runtime_convert(CtInterpreter *interpreter, Token token, CtValue value, 
 /* Evaluate a side-effect-free node now; fails, leaving no trace, if evaluation would. */
 int runtime_fold(CtInterpreter *interpreter, Node *node, CtValue *value);
 void optimize_unit(CtInterpreter *interpreter, Unit *unit);
+void optimize_function_scopes(CtInterpreter *interpreter, Node *function);
+int runtime_scalar_call(CtInterpreter *interpreter, Node *call);
 void runtime_prepare(Node *node);
 CtValue runtime_invoke(CtInterpreter *interpreter, Token name, CtValue pointer, const CtValue *values, size_t count);
 /* Borrow the remaining promoted arguments, consuming the list for v* I/O. */

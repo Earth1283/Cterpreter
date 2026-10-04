@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+Further interpreter optimizations reduce the new nine-program [performance
+suite](benchmarks/results/2026-10-04.md) from 464 to 411 ms, **11.5% less time**
+(1.13× faster) against `b56cba8`. The integer loop takes 26% less time and the
+two-argument call loop takes 22% less time. Cterpreter wins seven of nine races
+against CPython 3.14.4. The suite, Python ports, native output checks and raw
+before/after timings are now checked in. Typed nested arithmetic, direct
+integer conditions, local int stores, refined scalar-call scopes and cached
+builtin calls account for the gains. All 10 tests pass in Release and sanitizer
+builds; 2,100 differential cases have identical output, diagnostics and status,
+including strict mode and low execution limits.
+
 Cterpreter can now run its own front end: `.load main.c` in the REPL starts a Cterpreter inside a Cterpreter, and `Cterpreter main.c` does it from the shell. See "Running itself" in the README.
 
 - `.load FILE` runs `main` when the file defines one and the session did not already have one.

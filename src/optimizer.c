@@ -371,7 +371,7 @@ static int any_makes_temporaries(const Node *list) {
 
 static int makes_temporaries(const Node *node) {
     if (node->kind == N_BLOCK || node->kind == N_FOR) return 0;
-    if (node->kind == N_CALL || node->kind == N_COMPOUND || node->kind == N_VA_ARG) return 1;
+    if ((node->kind == N_CALL && !node->bare) || node->kind == N_COMPOUND || node->kind == N_VA_ARG) return 1;
     return any_makes_temporaries(node->left) || any_makes_temporaries(node->right) ||
            any_makes_temporaries(node->third) || any_makes_temporaries(node->fourth);
 }
@@ -382,6 +382,28 @@ static void mark_bare(Node *block) {
             item->kind == N_FUNCTION || makes_temporaries(item))
             return;
     block->bare = 1;
+}
+
+/* Once a function is declared, earlier global signatures (and its own) are
+ * established and cannot change. A direct call returning a scalar needs no
+ * temporary in the caller's scope. Unknown calls and function pointers remain
+ * conservative, as do aggregate-producing arguments to scalar calls. */
+static void refine_scopes(CtInterpreter *interpreter, Node *node) {
+    for (; node; node = node->next) {
+        refine_scopes(interpreter, node->left);
+        refine_scopes(interpreter, node->right);
+        refine_scopes(interpreter, node->third);
+        refine_scopes(interpreter, node->fourth);
+        if (node->kind == N_CALL) node->bare = runtime_scalar_call(interpreter, node);
+        if (node->kind == N_BLOCK) {
+            mark_bare(node);
+            runtime_prepare(node);
+        }
+    }
+}
+
+void optimize_function_scopes(CtInterpreter *interpreter, Node *function) {
+    refine_scopes(interpreter, function->right);
 }
 
 void optimize_unit(CtInterpreter *interpreter, Unit *unit) {

@@ -44,7 +44,8 @@ struct Node {
     int nesting;
     /* How an operand is read: FETCH_EVALUATE, or in place as one of the others. */
     int fetch;
-    /* N_BLOCK: declares nothing and cannot create temporaries, so it needs no scope. */
+    /* N_BLOCK: needs no scope. N_CALL: its resolved direct function cannot
+     * return an aggregate temporary (arguments may still create their own). */
     int bare;
     /* N_FUNCTION: its parameter count plus one when a call needs neither an argument
      * frame nor addressable parameters, and returns a scalar or nothing; else zero. */
@@ -58,6 +59,8 @@ struct Node {
     struct Frame *spare_frames; /* N_FUNCTION: frames of finished activations, ready for the next */
     /* The evaluator chosen for this node's shape before execution; NULL means the general one. */
     CtValue (*run)(CtInterpreter *interpreter, Node *node);
+    /* A comparison used as a condition can return truth without boxing it. */
+    int (*test)(CtInterpreter *interpreter, Node *node);
     /* The same for a statement, returning its control flow. */
     int (*perform)(CtInterpreter *interpreter, Node *node);
     /* Runtime caches; which member is live depends on the node kind. */

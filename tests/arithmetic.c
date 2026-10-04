@@ -175,6 +175,31 @@ int main(void) {
     expect_refused(interpreter, "enum Bad { EDGE = 2147483647, PAST };");
     expect_int(interpreter, "int scaled_array[SMALL + 1]; (int)sizeof(scaled_array)", 2 * (int)sizeof(int));
 
+    /* Exercise runtime int paths, rather than folding their operands. */
+    expect_int(interpreter, "int int_ops(int a, int b) { return ((a * 3 + b) / 2) % 17; } int_ops(11, 5)", 2);
+    expect_int(interpreter, "int bits(int a, int b) { return (a & b) | (a ^ b); } bits(12, 10)", 14);
+    expect_int(interpreter, "int neg_div(int a, int b) { return a / b * 10 + a % b; } neg_div(-7, 2)", -31);
+    expect_refused(interpreter, "int_ops(2147483647, 1)");
+    expect_refused(interpreter, "neg_div(1, 0)");
+    expect_refused(interpreter, "neg_div(-2147483647 - 1, -1)");
+    expect_int(interpreter, "int mixed_store(void) { int v; v = 4.75; v += 2.5; v *= 1.5; v -= 1.25; return v; } mixed_store()", 7);
+    expect_refused(interpreter, "int uninit_add(void) { int x; x += 1; return x; } uninit_add()");
+    expect_refused(interpreter, "int uninit_cond(void) { int x; if (x < 2) return 1; return 0; } uninit_cond()");
+    expect_int(interpreter, "int update_once(void) { int x = 2; x += (x = 5); return x; } update_once()", 7);
+    expect_int(interpreter, "int rhs_once(void) { int i = 1; return ((i++ + 2) * (i++ + 3)) + i * 100; } rhs_once()", 315);
+    expect_refused(interpreter, "int const_store(void) { const int x = 1; x += 2; return x; } const_store()");
+    expect_refused(interpreter, "int assign_overflow(void) { int x = 2147483647; x += 1; return x; } assign_overflow()");
+    expect_refused(interpreter, "int assign_sub_overflow(void) { int x = -2147483647 - 1; x -= 1; return x; } assign_sub_overflow()");
+    expect_refused(interpreter, "int assign_mul_overflow(void) { int x = 1073741824; x *= 2; return x; } assign_mul_overflow()");
+    expect_int(interpreter, "int compare_loop(void) { int x = 0, sum = 0; do { x++; if (x != 2) sum += x; } while (x < 4); while (x > 0) x--; for (int i = 0; i < 3; i++) sum += i; return sum + (x == 0); } compare_loop()", 12);
+    expect_int(interpreter, "int *check_bounds; int indexed_int(void) { int v[2] = {3, 7}; check_bounds = v; return (v[0] + 2) * v[1]; } indexed_int()", 35);
+    expect_refused(interpreter, "check_bounds[0]");
+    expect_real(interpreter, "double nested_real(double a, double b) { return (a * 2.0 + b) / 2.0; } nested_real(3.0, 4.0)", 5.0);
+    expect_refused(interpreter, "nested_real(1e308, 1.0)");
+    expect_refused(interpreter, "double nested_div(double a, double b) { return (a + 1.0) / (b - 1.0); } nested_div(2.0, 1.0)");
+    expect_real(interpreter, "nested_div(3.0, 3.0)", 2.0);
+    expect_int(interpreter, "int real_once(void) { double i = 1.0; double v = (i++ + 2.0) * (i++ + 3.0); return (int)(v + i * 100.0); } real_once()", 315);
+
     ct_destroy(interpreter);
     if (failures) fprintf(stderr, "%d arithmetic checks failed\n", failures);
     return failures ? EXIT_FAILURE : EXIT_SUCCESS;
