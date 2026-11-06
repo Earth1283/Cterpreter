@@ -125,9 +125,37 @@ struct CtInterpreter {
     Node *jump;               /* the goto being unwound */
     CtValue shown;            /* a final unterminated expression's value, for the REPL */
     int showing;
+    int jit_mode;
+    struct JitCode *jit_codes;    /* every compiled or rejected function, for ct_clear */
+    struct JitCatch *jit_catch;   /* where a failure inside native code unwinds to */
+    uintptr_t jit_floor;          /* the lowest stack address native code may reach, for the depth limit */
+    uint64_t *jit_objects;        /* addressed locals of native activations, innermost last */
+    size_t jit_object_count, jit_object_capacity;
 };
 
 CtValue runtime_error(CtInterpreter *interpreter, Token token, const char *message);
+CtValue runtime_memory_error(CtInterpreter *interpreter, const Token *token);
+void runtime_rearm(CtInterpreter *interpreter);
+Symbol *runtime_global(CtInterpreter *interpreter, const Token *name);
+CtValue runtime_binary(CtInterpreter *interpreter, int op, const Token *token, CtValue left, CtValue right);
+CtValue runtime_load(CtInterpreter *interpreter, const Token *token, uint64_t address, CtType type);
+CtValue runtime_store(CtInterpreter *interpreter, const Token *token, uint64_t address, CtType type, CtValue value);
+CtValue runtime_call_function(CtInterpreter *interpreter, const Token *name, Node *function,
+                              const CtValue *values, size_t count);
+CtValue runtime_call_address(CtInterpreter *interpreter, const Token *name, CtValue pointer,
+                             const CtValue *values, size_t count);
+/* Runs a declaration's initializer for the object at address, as its declaration would. */
+void runtime_initialize(CtInterpreter *interpreter, uint64_t address, Node *declaration);
+CtValue runtime_call_builtin(CtInterpreter *interpreter, const Token *name, size_t builtin, Node *prototype,
+                             const CtValue *values, size_t count);
+/* Runs the function natively when it compiles; returns 0, having done nothing, when it does not. */
+int jit_invoke(CtInterpreter *interpreter, const Token *name, Node *function,
+               const CtValue *values, size_t count, CtValue *result);
+/* Whether a call of the function should be offered to jit_invoke. */
+int jit_wanted(const CtInterpreter *interpreter, const Node *function);
+void jit_reset(CtInterpreter *interpreter);
+/* Drops native code that bound the name to the library, now that a global takes it. */
+void jit_forget(CtInterpreter *interpreter, const Token *name);
 CtValue runtime_convert(CtInterpreter *interpreter, Token token, CtValue value, CtType type);
 /* Evaluate a side-effect-free node now; fails, leaving no trace, if evaluation would. */
 int runtime_fold(CtInterpreter *interpreter, Node *node, CtValue *value);
@@ -159,7 +187,7 @@ enum {
     BR_CT_TYPE_NAME, BR_CT_TYPE_SIZE, BR_CT_EVAL, BR_CT_FORMAT_VALUE, BR_CT_PRINT_VALUE, BR_CT_DEPTH,
     BR_BOOT_VERIFY, BR_CONFIG_DEFAULTS, BR_CONFIG_INDEX, BR_CONFIG_NAME, BR_CONFIG_VALUE,
     BR_CONFIG_DESCRIPTION, BR_CONFIG_SET, BR_CONFIG_LOAD, BR_CONFIG_SAVE, BR_TERMINAL_INIT,
-    BR_TERMINAL_READ, BR_TERMINAL_DESTROY, BR_COUNT
+    BR_TERMINAL_READ, BR_TERMINAL_DESTROY, BR_CT_SET_JIT, BR_COUNT
 };
 CtValue bridge_call(CtInterpreter *interpreter, Token name, size_t id, const CtValue *args);
 void bridge_cleanup(CtInterpreter *interpreter);

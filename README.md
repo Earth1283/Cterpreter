@@ -2,7 +2,7 @@
 
 C, but interpreted. A C17 implementation of a C interpreter, with a persistent REPL and an increasingly unreasonable [roadmap](Cterpreter_Roadmap.md).
 
-Cterpreter evaluates its own AST; it does not invoke a compiler to execute your program. It runs C programs that use the full scalar type system, structures, unions, enumerations, multidimensional arrays, function pointers, macros, and a useful subset of the standard library. Full C17 and self-interpretation remain unfinished.
+Cterpreter evaluates its own AST and never invokes an external compiler to execute your program; for long-running programs it [compiles functions to x86-64 machine code itself](#native-compilation). It runs C programs that use the full scalar type system, structures, unions, enumerations, multidimensional arrays, function pointers, macros, and a useful subset of the standard library. Full C17 and self-interpretation remain unfinished.
 
 Current status: [Misendeavor log](PROGRESS.md). Browse the [feature-organized examples](examples/README.md) for runnable programs and expected results, or go straight to the [playground](examples/README.md#playground) for a spinning ASCII donut, Conway's Game of Life, a Brainfuck interpreter running inside this one, a maze generator, and a text adventure set inside a C interpreter. The [unhinged](examples/README.md#unhinged) programs go further: a quine, a Forth, a Lisp with a Y combinator, arithmetic in pure SKI combinators, a factorial computed by running itself six interpreters deep, and a pointer with 46 stars.
 
@@ -94,7 +94,7 @@ printf 'int x = 6; x * 7\n' | ./build/Cterpreter
 
 Files and piped source run `main` automatically when it exists. Both `int main(void)` and `int main(int argc, char **argv)` are supported; the return value becomes the process exit status. Top-level Cterpreter statements are also allowed. Source supplied with `-e` evaluates directly, without automatically calling `main`.
 
-`--no-prompt` selects a line-oriented REPL even with redirected input. Other options include `--history FILE`, `--color auto|always|never`, `--max-steps N` (any size), `--max-depth N` (up to 8192), `--max-nesting N` (up to 64), `--strict`, and `--verbose`. `NO_COLOR` disables automatic colors. `--help` lists all options.
+`--no-prompt` selects a line-oriented REPL even with redirected input. Other options include `--history FILE`, `--color auto|always|never`, `--max-steps N` (any size), `--max-depth N` (up to 8192), `--max-nesting N` (up to 64), `--jit auto|on|off`, `--strict`, and `--verbose`. `NO_COLOR` disables automatic colors. `--help` lists all options.
 
 `--strict` turns an invalid memory access into the `SIGSEGV` the program would have earned natively, after printing the diagnostic, instead of reporting it and stopping cleanly.
 
@@ -124,6 +124,26 @@ c> .quit
 `.load` runs `main` when the loaded file defines one, as `Cterpreter file.c` does. `./build/Cterpreter main.c [options]` does the same from the shell, and the options reach the inner front end. The inner front end has its own prompt, history, hints, completion, `.config`, and Ctrl+C, and it can load `main.c` again to go one level deeper, up to `--max-nesting`. A nested front end shares the outer one's step and frame budget, so a long session inside one wants a larger `--max-steps`.
 
 What runs interpreted is the front end itself: option parsing, the REPL loop, every `.` command, the syntax tips, hints, and `.config`. What runs natively is the engine below `ct_create`, `ct_eval` and the rest of `cterpreter.h`, plus `boot_verify`, the `config_*` functions and `terminal_*`. A program that declares those functions gets the native implementations, exactly as it gets `printf`; each `ct_create` makes a real child interpreter, as `interpret()` does. The interpreter core itself still cannot be linked into an interpreted program, and a `sigaction` handler runs at the next safe point rather than asynchronously.
+
+## Native compilation
+
+Cterpreter carries its own compiler. On a function's first call it translates the function's syntax tree into x86-64 machine code, with no external compiler or library involved, and later calls run that code directly. Functions it calls compile the same way on their own first call, and native code calls native code directly. A function that uses anything the compiler does not handle stays interpreted, and the two kinds call each other freely.
+
+```sh
+./build/Cterpreter --max-steps 100000000000 benchmarks/fib_long.c       # compiled
+./build/Cterpreter --max-steps 100000000000 --jit off benchmarks/fib_long.c
+CTERPRETER_JIT_LOG=1 ./build/Cterpreter --jit on examples/unhinged/lisp.c
+```
+
+Compiled code keeps the interpreter's semantics: signed overflow, division by zero, shift ranges, conversions out of range, non-finite floating-point results, null and dangling pointers, out-of-bounds accesses, uninitialized reads, writes to read-only objects, and strict mode are diagnosed with the same message at the same place. Every memory access checks the interpreter's own object records through a per-site cache, and any diagnostic is raised by the interpreter's own routine on a slow path. Output, diagnostics, and exit status are therefore identical to interpreting the program, which `tests/jit_differential.py` checks on generated programs that mix every integer width, doubles, pointers, arrays, `switch`, recursion, library calls, and many ways to fail.
+
+The exceptions are the execution limits. Native code charges steps per loop iteration and function entry rather than per node, and it charges recursion by the native stack it uses rather than by nested evaluations. A program that exceeds a limit is still stopped, but not necessarily at the same node. So that this cannot change any result, the default mode (`--jit auto`) compiles only when `--max-steps` is at least 10,000,000; under the default limit of one million steps everything is interpreted exactly as before. `--jit on` compiles regardless of the limits, and `--jit off` never compiles.
+
+What compiles: functions whose names resolve lexically (no `goto`, no declarations directly in a `switch`), with integer, `double`, and pointer parameters and results; local scalars, arrays, structures, and unions; globals, `static` locals, and enumeration constants; every operator, cast, `sizeof`, member access, and pointer arithmetic; `if`, loops, `switch`, `break`, and `continue`; calls to other functions, through function pointers, and to the library. `isdigit` and the rest of `ctype.h`, `abs`, `labs`, `sqrt`, and `fabs` are done inline. What stays interpreted: `float`, variadic functions, `_Generic`, compound literals, functions that take or return structures, and initializer lists that read the function's own locals.
+
+Several optimizations follow from those guarantees. Up to three integer locals live in registers, as do up to six `double` locals. In a loop that calls nothing, and so cannot end any object's lifetime, an array or an unchanged pointer is validated once on entry, after which each element access is a bounds comparison. Division by a power of two becomes a shift. The step count lives in a register. Each function is compiled into memory that is writable while it is written and only executable afterwards.
+
+The compiler runs on x86-64 Linux and macOS; on other machines, including Apple Silicon, every function is interpreted. `-DCT_NO_JIT=ON` builds without it. Embedders choose per interpreter with `ct_set_jit(interpreter, CT_JIT_OFF | CT_JIT_AUTO | CT_JIT_ON)`, and the `CTERPRETER_JIT=on|off|auto` environment variable sets the default for every interpreter a process creates. `CTERPRETER_JIT_LOG=1` reports each function that compiles and why any other does not. `CTERPRETER_JIT_DUMP=DIR` writes each function's machine code to `DIR/NAME.bin`, which `objdump -D -b binary -mi386:x86-64 -M intel` disassembles.
 
 ## Implemented language and runtime
 
@@ -169,19 +189,19 @@ This is not a conforming C17 implementation. Remaining work includes bit-fields,
 
 Semantic checking largely happens during execution. Operand/argument evaluation proceeds left to right, and unsequenced side effects are not diagnosed. Some invalid constructs in unexecuted branches can therefore escape checking. Switch labels belong directly to the switch block. Diagnostics after expanded includes can refer to the expanded source line rather than the original header line.
 
-There is no dynamic-library interface, clangd/LSP connection, native assembly backend, or debugger. Completions, signatures, and live diagnostics come from Cterpreter's own symbol table and parser, not from clangd. The standard library is a subset; scanf scansets and wide-character formats are not implemented. `.type` and `.ast` use the current macros and type aliases without executing the inspected source.
+There is no dynamic-library interface, clangd/LSP connection, `.asm` command, or debugger, and the native compiler targets x86-64 only. Completions, signatures, and live diagnostics come from Cterpreter's own symbol table and parser, not from clangd. The standard library is a subset; scanf scansets and wide-character formats are not implemented. `.type` and `.ast` use the current macros and type aliases without executing the inspected source.
 
 Defaults are 1 MiB of source per submission, 64 MiB of live managed object data, one million execution steps, 2048 evaluation frames, and 8 levels of `interpret()` nesting. A step is one statement or one evaluated expression node; constants and local variables read as operands are free, as are expressions folded before execution. `--max-depth` counts nested statements, and each call also counts the evaluations enclosing it within its statement, so one level of interpreted recursion costs a few frames; nested interpreters share one frame budget because they share the host stack. There are separate syntax/macro/include nesting limits and a 4096-entry limit on distinct types. These are resource bounds, not a security sandbox. Interpreter instances have separate symbols, macros, memory, file handles, and random-number state; the type descriptions themselves are shared and released when the last instance is destroyed. `rand` is Cterpreter's own generator rather than the host's, so a seeded sequence is reproducible here but differs from the same program compiled natively.
 
 ## Development
 
-`include/cterpreter.h` exposes the embedding API. The lexer, parser, type registry, preprocessor, pre-execution optimizer, evaluator, managed memory, library adapters, boot ceremony, and terminal editor live in `src/`. Host streams, execution limits, nesting, and strict mode are configurable per interpreter.
+`include/cterpreter.h` exposes the embedding API. The lexer, parser, type registry, preprocessor, pre-execution optimizer, evaluator, native compiler (`src/jit.c`), managed memory, library adapters, boot ceremony, and terminal editor live in `src/`. Host streams, execution limits, nesting, native compilation, and strict mode are configurable per interpreter.
 
 Objects live in a table kept sorted by address, so a memory access is a binary search rather than a walk of every allocation ever made. Freed objects stay in that table, which is what lets an access report that a lifetime ended rather than that a pointer was never valid; only the most recent few thousand deaths are kept, so a long-running loop cannot grow the table without bound.
 
 Strict Clang/GCC warnings are enabled. The test suite covers the lexer and parser directly, pins integer boundaries and conversions, fuzzes malformed input, and compares every example against the host compiler's own output. When Python 3 is available, CTest also tests preference persistence and the real terminal editor through a pseudo-terminal, including live toggles and narrow windows. CI is configured for GCC and Clang on Linux and Apple Clang on macOS; these hosted runs have not been executed in this workspace.
 
-The [performance suite](benchmarks/README.md) compares independent Cterpreter builds against equivalent Python programs, checks their output against native C, and saves raw timings for before/after comparisons.
+The [performance suite](benchmarks/README.md) compares independent Cterpreter builds against equivalent Python and JavaScript programs, checks their output against native C, and saves raw timings for before/after comparisons. CTest runs the reference programs a second time with native compilation forced on, and `jit_differential` compares interpreted and compiled runs of generated programs.
 
 ```sh
 ctest --test-dir build --output-on-failure

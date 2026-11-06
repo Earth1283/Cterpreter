@@ -227,11 +227,14 @@ CtInterpreter *ct_create(void) {
         interpreter->depth_limit = 256;
         interpreter->nesting_limit = 8;
         interpreter->random_state = 1;
+        const char *jit = getenv("CTERPRETER_JIT");
+        interpreter->jit_mode = !jit ? CT_JIT_AUTO : !strcmp(jit, "on") ? CT_JIT_ON : !strcmp(jit, "off") ? CT_JIT_OFF : CT_JIT_AUTO;
     }
     return interpreter;
 }
 
 void ct_clear(CtInterpreter *interpreter) {
+    jit_reset(interpreter);
     builtin_cleanup(interpreter);
     scope_clear(interpreter, &interpreter->globals);
     scope_open(interpreter, &interpreter->globals, NULL);
@@ -282,6 +285,10 @@ void ct_set_strict(CtInterpreter *interpreter, int strict) {
     interpreter->strict = strict;
 }
 
+void ct_set_jit(CtInterpreter *interpreter, int mode) {
+    interpreter->jit_mode = mode == CT_JIT_OFF || mode == CT_JIT_ON ? mode : CT_JIT_AUTO;
+}
+
 CtValue runtime_error(CtInterpreter *interpreter, Token token, const char *message) {
     if (!interpreter->failed) {
         interpreter->failed = 1;
@@ -317,6 +324,10 @@ static void rearm(CtInterpreter *interpreter) {
     interpreter->tick_boundary = interpreter->failed || interpreter->exit_requested ? 0
                                : poll < interpreter->step_limit ? poll : interpreter->step_limit;
 }
+
+void runtime_rearm(CtInterpreter *interpreter) { rearm(interpreter); }
+
+CtValue runtime_memory_error(CtInterpreter *interpreter, const Token *token) { return memory_error(interpreter, token); }
 
 static NOINLINE int tick_slow(CtInterpreter *interpreter, Node *node) {
     if (interpreter->failed || interpreter->exit_requested) {
@@ -407,6 +418,10 @@ static inline Symbol *resolve(CtInterpreter *interpreter, Node *node) {
     return resolve_again(scope, node);
 }
 
+Symbol *runtime_global(CtInterpreter *interpreter, const Token *name) {
+    return lookup_hashed(&interpreter->globals, name, token_hash(*name), 1);
+}
+
 int runtime_scalar_call(CtInterpreter *interpreter, Node *call_node) {
     Node *callee = call_node->left;
     if (!callee || callee->kind != N_NAME || callee->resolution != RESOLVE_GLOBAL) return 0;
@@ -468,6 +483,7 @@ static Symbol *define(CtInterpreter *interpreter, Node *node, CtType type, Symbo
     symbol->next = interpreter->scope->symbols;
     interpreter->scope->symbols = symbol;
     if (indexed) scope_index(interpreter->scope, symbol);
+    if (global && interpreter->jit_codes) jit_forget(interpreter, token);
     return symbol;
 }
 
@@ -966,6 +982,10 @@ static ALWAYS_INLINE CtValue binary(CtInterpreter *interpreter, int kind, const 
     return mixed_binary(interpreter, kind, token, left, right);
 }
 
+CtValue runtime_binary(CtInterpreter *interpreter, int op, const Token *token, CtValue left, CtValue right) {
+    return binary(interpreter, op, token, left, right);
+}
+
 static CtValue evaluate(CtInterpreter *interpreter, Node *node);
 static CtValue operand(CtInterpreter *interpreter, Node *node);
 static Flow execute(CtInterpreter *interpreter, Node *node);
@@ -1225,6 +1245,14 @@ static inline CtValue store_value(CtInterpreter *interpreter, const Token *token
     }
     if (!memory_write(&interpreter->memory, object.address, value)) return memory_error(interpreter, token);
     return value;
+}
+
+CtValue runtime_load(CtInterpreter *interpreter, const Token *token, uint64_t address, CtType type) {
+    return load(interpreter, token, (Lvalue){address, type, 0, NULL});
+}
+
+CtValue runtime_store(CtInterpreter *interpreter, const Token *token, uint64_t address, CtType type, CtValue value) {
+    return store_value(interpreter, token, (Lvalue){address, type, 0, NULL}, value);
 }
 
 static void initialize(CtInterpreter *interpreter, uint64_t address, CtType type, Node **item, Token token);
@@ -1712,6 +1740,10 @@ static NOINLINE CtValue invoke_simple(CtInterpreter *interpreter, const Token *n
 
 /* Binds already-evaluated arguments to an interpreted function and runs its body. */
 static CtValue invoke(CtInterpreter *interpreter, const Token *name, Node *function, const CtValue *values, size_t count) {
+    CtValue native;
+    if (function->right && jit_wanted(interpreter, function) &&
+        jit_invoke(interpreter, name, function, values, count, &native))
+        return native;
     if (function->simple && (size_t)function->simple == count + 1) return invoke_simple(interpreter, name, function, values);
     if (!function->right) return runtime_error(interpreter, *name, "function is declared but not defined");
     size_t parameters = 0;
@@ -1764,6 +1796,18 @@ static CtValue invoke(CtInterpreter *interpreter, const Token *name, Node *funct
     return result;
 }
 
+CtValue runtime_call_function(CtInterpreter *interpreter, const Token *name, Node *function,
+                              const CtValue *values, size_t count) {
+    return invoke(interpreter, name, function, values, count);
+}
+
+CtValue runtime_call_address(CtInterpreter *interpreter, const Token *name, CtValue pointer,
+                             const CtValue *values, size_t count) {
+    Node *function = function_at(interpreter, pointer.as.address);
+    if (!function) return runtime_error(interpreter, *name, "call through an invalid function pointer");
+    return invoke(interpreter, name, function, values, count);
+}
+
 /* Library functions such as qsort reach interpreted callbacks through this. */
 CtValue runtime_invoke(CtInterpreter *interpreter, Token name, CtValue pointer, const CtValue *values, size_t count) {
     if (!type_is_pointer(pointer.type) || !type_is_function(type_target(pointer.type)))
@@ -1794,6 +1838,11 @@ static ALWAYS_INLINE CtValue call_builtin(CtInterpreter *interpreter, const Toke
     if (!interpreter->failed && type_is_scalar(declared) && type_is_scalar(result.type))
         result = convert(interpreter, name, result, declared, 0);
     return result;
+}
+
+CtValue runtime_call_builtin(CtInterpreter *interpreter, const Token *name, size_t builtin, Node *prototype,
+                             const CtValue *values, size_t count) {
+    return call_builtin(interpreter, name, builtin, prototype, values, count);
 }
 
 static CtValue call(CtInterpreter *interpreter, Node *node) {
@@ -2567,7 +2616,7 @@ static CtValue run_call(CtInterpreter *interpreter, Node *node) {
     CtValue result;
     Symbol *symbol = node->simple ? resolve(interpreter, node->left) : NULL;
     Node *function = !symbol ? NULL : symbol->function ? symbol->function : pointed_function(interpreter, node, symbol);
-    if (function && function->simple == node->simple) {
+    if (function && function->simple == node->simple && !(function->right && jit_wanted(interpreter, function))) {
         /* Each argument goes straight into the callee's frame, converted as it arrives. */
         const Token *name = &node->left->token;
         Frame *frame = function->slot ? frame_take(interpreter, name, function) : NULL;
@@ -2672,10 +2721,18 @@ static int constant_expression(CtInterpreter *interpreter, Node *node) {
     return 0;
 }
 
-static NOINLINE void initialize_aggregate(CtInterpreter *interpreter, Symbol *symbol, Node *node) {
+static NOINLINE void initialize_at(CtInterpreter *interpreter, uint64_t address, Node *node) {
     Node *item = node->left;
-    initialize(interpreter, symbol->address, node->type, &item, node->token);
+    initialize(interpreter, address, node->type, &item, node->token);
     if (item && !interpreter->failed) (void)runtime_error(interpreter, item->token, "too many initializers");
+}
+
+static void initialize_aggregate(CtInterpreter *interpreter, Symbol *symbol, Node *node) {
+    initialize_at(interpreter, symbol->address, node);
+}
+
+void runtime_initialize(CtInterpreter *interpreter, uint64_t address, Node *declaration) {
+    initialize_at(interpreter, address, declaration);
 }
 
 static ALWAYS_INLINE void initialize_symbol(CtInterpreter *interpreter, Symbol *symbol, Node *node) {

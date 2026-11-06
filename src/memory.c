@@ -174,6 +174,7 @@ void memory_release_record(Memory *memory, Allocation *allocation) {
     allocation->initialized = NULL;
     allocation->alive = 0;
     ++memory->dead;
+    ++memory->epoch;
     memory->bytes -= allocation->size;
 }
 

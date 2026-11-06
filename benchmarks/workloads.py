@@ -1,4 +1,5 @@
 """Python ports: same loops, sizes and checksums as the adjacent C files."""
+import math
 import sys
 
 
@@ -118,6 +119,201 @@ def strings():
             if text[j].isdigit():
                 total += 1
     print(total)
+
+
+def fib_long():
+    print(fib(35))
+
+
+def sieve_long():
+    n, count = 8000000, 0
+    flags = bytearray(n)
+    i = 2
+    while i * i < n:
+        if not flags[i]:
+            for j in range(i * i, n, i):
+                flags[j] = 1
+        i += 1
+    for i in range(2, n):
+        if not flags[i]:
+            count += 1
+    print(count)
+
+
+def nqueens():
+    n = 11
+    col = [0] * n
+
+    def safe(row, c):
+        for r in range(row):
+            d = col[r] - c
+            if d == 0 or d == row - r or d == r - row:
+                return 0
+        return 1
+
+    def place(row):
+        if row == n:
+            return 1
+        count = 0
+        for c in range(n):
+            if safe(row, c):
+                col[row] = c
+                count += place(row + 1)
+        return count
+
+    print(place(0))
+
+
+def collatz():
+    best = arg = total = 0
+    for n in range(1, 150000):
+        x, steps = n, 0
+        while x != 1:
+            if x % 2 == 0:
+                x = x // 2
+            else:
+                x = 3 * x + 1
+            steps += 1
+        total += steps
+        if steps > best:
+            best, arg = steps, n
+    print(arg, best, total)
+
+
+def quicksort():
+    def sort(a, lo, hi):
+        while lo < hi:
+            pivot, i, j = a[(lo + hi) // 2], lo, hi
+            while i <= j:
+                while a[i] < pivot:
+                    i += 1
+                while a[j] > pivot:
+                    j -= 1
+                if i <= j:
+                    a[i], a[j] = a[j], a[i]
+                    i += 1
+                    j -= 1
+            if j - lo < hi - i:
+                sort(a, lo, j)
+                lo = i
+            else:
+                sort(a, i, hi)
+                hi = j
+
+    n, s = 200000, 12345
+    a = [0] * n
+    for i in range(n):
+        s = (s * 1103515245 + 12345) & 0xFFFFFFFF
+        a[i] = (s >> 8) & 0xFFFFF
+    sort(a, 0, n - 1)
+    total = 0
+    for i in range(n):
+        if i > 0 and a[i - 1] > a[i]:
+            print("unsorted")
+            sys.exit(1)
+        total += (i % 101) * a[i]
+    print(total)
+
+
+def matrix_long():
+    n = 120
+    a, b, c = [0] * (n * n), [0] * (n * n), [0] * (n * n)
+    for i in range(n * n):
+        a[i], b[i] = i % 17, i % 13
+    for i in range(n):
+        for j in range(n):
+            for k in range(n):
+                c[i * n + j] += a[i * n + k] * b[k * n + j]
+    print(sum(c))
+
+
+def lcs():
+    n, s = 2000, 99
+    x, y = [0] * n, [0] * n
+    for i in range(n):
+        s = (s * 1103515245 + 12345) & 0xFFFFFFFF
+        x[i] = (s >> 16) & 3
+        s = (s * 1103515245 + 12345) & 0xFFFFFFFF
+        y[i] = (s >> 16) & 3
+    prev, cur = [0] * (n + 1), [0] * (n + 1)
+    for i in range(1, n + 1):
+        for j in range(1, n + 1):
+            if x[i - 1] == y[j - 1]:
+                cur[j] = prev[j - 1] + 1
+            else:
+                cur[j] = prev[j] if prev[j] > cur[j - 1] else cur[j - 1]
+        prev, cur = cur, prev
+    print(prev[n])
+
+
+def mandelbrot_long():
+    total = 0
+    for y in range(240):
+        for x in range(320):
+            cr, ci = x * 3.0 / 320 - 2.0, y * 2.0 / 240 - 1.0
+            zr, zi, n = 0.0, 0.0, 0
+            while zr * zr + zi * zi < 4.0 and n < 200:
+                nxt = zr * zr - zi * zi + cr
+                zi = 2.0 * zr * zi + ci
+                zr = nxt
+                n += 1
+            total += n
+    print(total)
+
+
+def spectral():
+    n = 200
+
+    def A(i, j):
+        return 1.0 / ((i + j) * (i + j + 1) // 2 + i + 1)
+
+    def mul_av(v, out):
+        for i in range(n):
+            s = 0.0
+            for j in range(n):
+                s += A(i, j) * v[j]
+            out[i] = s
+
+    def mul_atv(v, out):
+        for i in range(n):
+            s = 0.0
+            for j in range(n):
+                s += A(j, i) * v[j]
+            out[i] = s
+
+    u, v, t = [1.0] * n, [0.0] * n, [0.0] * n
+    for _ in range(10):
+        mul_av(u, t)
+        mul_atv(t, v)
+        mul_av(v, t)
+        mul_atv(t, u)
+    vbv = vv = 0.0
+    for i in range(n):
+        vbv += u[i] * v[i]
+        vv += v[i] * v[i]
+    print("%.9f" % math.sqrt(vbv / vv))
+
+
+def strings_long():
+    total = 0
+    for i in range(300000):
+        text = "item-%06d" % i
+        total += len(text)
+        for j in range(len(text)):
+            if text[j].isdigit():
+                total += 1
+    print(total)
+
+
+def hash():
+    h, s = 2166136261, 1
+    for i in range(3000000):
+        s = (s * 1664525 + 1013904223) & 0xFFFFFFFF
+        h ^= (s >> 24) & 255
+        h = (h * 16777619) & 0xFFFFFFFF
+        h ^= h >> 13
+        h = (h + (i & 1023)) & 0xFFFFFFFF
+    print(h, s)
 
 
 if __name__ == "__main__":

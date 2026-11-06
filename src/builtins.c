@@ -228,7 +228,8 @@ static const Signature signatures[] = {
     [BI_BRIDGE + BR_CONFIG_SAVE] = {"config_save", RT_INT, 2, "const CliConfig *config, const char *path"},
     [BI_BRIDGE + BR_TERMINAL_INIT] = {"terminal_init", RT_VOID, 3, "Terminal *terminal, const char *history_path, int color"},
     [BI_BRIDGE + BR_TERMINAL_READ] = {"terminal_read", RT_CHAR_POINTER, 3, "Terminal *terminal, const char *prompt, const volatile sig_atomic_t *interrupted"},
-    [BI_BRIDGE + BR_TERMINAL_DESTROY] = {"terminal_destroy", RT_VOID, 1, "Terminal *terminal"}
+    [BI_BRIDGE + BR_TERMINAL_DESTROY] = {"terminal_destroy", RT_VOID, 1, "Terminal *terminal"},
+    [BI_BRIDGE + BR_CT_SET_JIT] = {"ct_set_jit", RT_VOID, 2, "CtInterpreter *interpreter, int mode"}
 };
 
 _Static_assert(BI_COUNT == sizeof signatures / sizeof signatures[0], "builtin ids must match signatures");
@@ -472,7 +473,8 @@ void builtin_cleanup(CtInterpreter *interpreter) {
     }
 }
 
-typedef struct { char *data; size_t size, capacity; } Output;
+/* A borrowed buffer belongs to the caller and is copied, not reallocated, once it is outgrown. */
+typedef struct { char *data; size_t size, capacity; int borrowed; } Output;
 
 /* The conversion and its length modifier name the C type the argument stands for. */
 static CtType conversion_type(char conversion, char length, int doubled) {
@@ -491,10 +493,12 @@ static int append(Output *output, const char *data, size_t length) {
     size_t needed = output->size + length + 1;
     if (needed > output->capacity) {
         size_t capacity = needed < 256 ? 256 : needed * 2;
-        char *grown = realloc(output->data, capacity);
+        char *grown = output->borrowed ? malloc(capacity) : realloc(output->data, capacity);
         if (!grown) return 0;
+        if (output->borrowed && output->size) memcpy(grown, output->data, output->size);
         output->data = grown;
         output->capacity = capacity;
+        output->borrowed = 0;
     }
     memcpy(output->data + output->size, data, length);
     output->size += length;
@@ -510,6 +514,50 @@ typedef struct {
     uint64_t unsigned_value;
     double real_value;
 } Conversion;
+
+static size_t decimal(char *buffer, int value) {
+    char digits[16];
+    size_t count = 0, length = 0;
+    do digits[count++] = (char)('0' + value % 10); while ((value /= 10) && count < sizeof digits);
+    while (count) buffer[length++] = digits[--count];
+    return length;
+}
+
+/* What snprintf prints for an integer conversion with only the - and 0 flags,
+ * a modest width and no precision; -1 when the case is not that simple. */
+static int quick_integer(char *buffer, size_t capacity, const char *flags, int width, const Conversion *value) {
+    int left = 0, zero = 0;
+    for (; *flags; ++flags) {
+        if (*flags == '-') left = 1;
+        else if (*flags == '0') zero = 1;
+        else return -1;
+    }
+    if (width > 64) return -1;
+    char digits[32];
+    size_t count = 0;
+    int negative = 0;
+    char conversion = value->conversion;
+    if (conversion == 'd' || conversion == 'i') {
+        uint64_t magnitude = value->signed_value < 0 ? 0u - (uint64_t)value->signed_value : (uint64_t)value->signed_value;
+        negative = value->signed_value < 0;
+        do digits[count++] = (char)('0' + magnitude % 10); while (magnitude /= 10);
+    } else {
+        uint64_t magnitude = value->unsigned_value;
+        unsigned base = conversion == 'u' ? 10 : conversion == 'o' ? 8 : 16;
+        const char *alphabet = conversion == 'X' ? "0123456789ABCDEF" : "0123456789abcdef";
+        do digits[count++] = alphabet[magnitude % base]; while (magnitude /= base);
+    }
+    size_t body = count + (size_t)negative, total = (size_t)width > body ? (size_t)width : body;
+    if (total + 1 > capacity) return -1;
+    size_t length = 0, padding = total - body;
+    if (!left && !zero) while (padding) { buffer[length++] = ' '; --padding; }
+    if (negative) buffer[length++] = '-';
+    if (!left && zero) while (padding) { buffer[length++] = '0'; --padding; }
+    while (count) buffer[length++] = digits[--count];
+    while (padding) { buffer[length++] = ' '; --padding; }
+    buffer[length] = '\0';
+    return (int)length;
+}
 
 static int format_conversion(char *buffer, size_t capacity, const char *spec, const Conversion *value) {
     switch (value->conversion) {
@@ -536,7 +584,8 @@ static CtValue formatted(CtInterpreter *interpreter, Token name, size_t id, cons
     if (count <= first) return runtime_error(interpreter, name, "missing format argument");
     char *format = string(interpreter, name, args[first]);
     if (!format) return integer(0);
-    Output output = {0};
+    char storage[256];
+    Output output = {storage, 0, sizeof storage, 1};
     size_t argument = first + 1;
     for (size_t i = 0; format[i] && !interpreter->failed; ++i) {
         if (format[i] != '%') {
@@ -567,7 +616,9 @@ static CtValue formatted(CtInterpreter *interpreter, Token name, size_t id, cons
             width = width * 10 + format[i++] - '0';
         }
         if (width > (int)CT_SOURCE_LIMIT) { (void)runtime_error(interpreter, name, "printf width exceeds output limit"); break; }
-        if (width) used += (size_t)snprintf(spec + used, sizeof spec - used, "%d", width);
+        size_t flags_end = used;
+        if (width) used += decimal(spec + used, width);
+        int precise = 0;
         if (format[i] == '.') {
             ++i;
             int precision = 0;
@@ -580,7 +631,11 @@ static CtValue formatted(CtInterpreter *interpreter, Token name, size_t id, cons
                 precision = precision * 10 + format[i++] - '0';
             }
             if (precision > (int)CT_SOURCE_LIMIT) { (void)runtime_error(interpreter, name, "printf precision exceeds output limit"); break; }
-            if (precision >= 0) used += (size_t)snprintf(spec + used, sizeof spec - used, ".%d", precision);
+            if (precision >= 0) {
+                spec[used++] = '.';
+                used += decimal(spec + used, precision);
+            }
+            precise = 1;
         }
         char length = 0;
         int doubled = 0;
@@ -628,7 +683,14 @@ static CtValue formatted(CtInterpreter *interpreter, Token name, size_t id, cons
         spec[used] = '\0';
         Conversion argument_value = {conversion, integer_conversion, text, signed_value, unsigned_value, real_value};
         char inline_piece[128];
-        int required = format_conversion(inline_piece, sizeof inline_piece, spec, &argument_value);
+        int required = -1;
+        if (integer_conversion && !precise) {
+            char flags[24];
+            memcpy(flags, spec + 1, flags_end - 1);
+            flags[flags_end - 1] = '\0';
+            required = quick_integer(inline_piece, sizeof inline_piece, flags, width, &argument_value);
+        }
+        if (required < 0) required = format_conversion(inline_piece, sizeof inline_piece, spec, &argument_value);
         if (required < 0 || required > (int)CT_SOURCE_LIMIT) { (void)runtime_error(interpreter, name, "formatted output limit exceeded"); break; }
         char *piece = (size_t)required < sizeof inline_piece ? inline_piece : malloc((size_t)required + 1);
         if (!piece) { (void)runtime_error(interpreter, name, "out of memory"); break; }
@@ -648,7 +710,7 @@ static CtValue formatted(CtInterpreter *interpreter, Token name, size_t id, cons
             }
         } else if (output.size && fwrite(output.data, 1, output.size, stream) != output.size) result = -1;
     }
-    free(output.data);
+    if (!output.borrowed) free(output.data);
     return integer(result);
 }
 
@@ -944,6 +1006,7 @@ static CtValue interpret(CtInterpreter *interpreter, Token name, CtValue argumen
     ct_set_limits(child, budget, frames);
     ct_set_nesting(child, interpreter->nesting + 1, interpreter->nesting_limit);
     ct_set_strict(child, interpreter->strict);
+    ct_set_jit(child, interpreter->jit_mode);
     ct_set_filename(child, path);
     CtError diagnostic = {0};
     CtValue result;

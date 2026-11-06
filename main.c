@@ -26,7 +26,7 @@ typedef struct {
     CliConfig config;
     size_t steps;
     unsigned depth, nesting;
-    int color, verbose, strict, in_repl;
+    int color, verbose, strict, in_repl, jit;
 } Application;
 
 static void update_color(Application *app) {
@@ -181,6 +181,7 @@ static CtInterpreter *create_interpreter(Application *app) {
         ct_set_limits(interpreter, app->steps, app->depth);
         ct_set_nesting(interpreter, 0, app->nesting);
         ct_set_strict(interpreter, app->strict);
+        if (app->jit >= 0) ct_set_jit(interpreter, app->jit);
     }
     return interpreter;
 }
@@ -536,6 +537,7 @@ static void usage(FILE *stream) {
           "  --max-depth N     Set the evaluation depth limit (up to 8192)\n"
           "  --max-nesting N   Set how deep interpret() may nest (up to 64)\n"
           "  --strict          Raise SIGSEGV on an invalid access instead of diagnosing it\n"
+          "  --jit MODE        Compile functions to native code: auto, on, or off\n"
           "  --verbose         Show initialization details\n"
           "  --version         Show version\n"
           "  -h, --help        Show help\n\n"
@@ -553,7 +555,7 @@ static int positive(const char *text, size_t maximum, size_t *result) {
 }
 
 int main(int argc, char **argv) {
-    Application app = {.prompt = "c> ", .steps = 1000000, .depth = 2048, .nesting = 8};
+    Application app = {.prompt = "c> ", .steps = 1000000, .depth = 2048, .nesting = 8, .jit = -1};
     config_defaults(&app.config);
     const char *path = NULL, *source = NULL, *color_mode = NULL;
     int quiet_repl = 0, path_index = 0, no_history = 0, no_config = 0, explicit_config = 0;
@@ -569,9 +571,14 @@ int main(int argc, char **argv) {
         else if ((!strcmp(argument, "-e") || !strcmp(argument, "--prompt") || !strcmp(argument, "--color") ||
                   !strcmp(argument, "--history") || !strcmp(argument, "--max-steps") ||
                   !strcmp(argument, "--max-depth") || !strcmp(argument, "--max-nesting") ||
-                  !strcmp(argument, "--config")) && i + 1 < argc) {
+                  !strcmp(argument, "--config") || !strcmp(argument, "--jit")) && i + 1 < argc) {
             const char *value = argv[++i];
             if (!strcmp(argument, "-e")) { if (source) { usage(stderr); return 2; } source = value; }
+            else if (!strcmp(argument, "--jit")) {
+                app.jit = !strcmp(value, "on") ? CT_JIT_ON : !strcmp(value, "off") ? CT_JIT_OFF
+                        : !strcmp(value, "auto") ? CT_JIT_AUTO : -1;
+                if (app.jit < 0) { fputs("error: --jit expects auto, on, or off\n", stderr); return 2; }
+            }
             else if (!strcmp(argument, "--prompt")) app.prompt = value;
             else if (!strcmp(argument, "--color")) color_mode = value;
             else if (!strcmp(argument, "--history")) app.history_path = value;

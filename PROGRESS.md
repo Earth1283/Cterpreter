@@ -1,5 +1,15 @@
 # Misendeavor log
 
+## 2026-11-06 — A native compiler
+
+Cterpreter compiles functions to x86-64 machine code on their first call. The twenty-program suite takes 518.5 ms instead of 7,239 ms (13.96× faster), ahead of CPython on every workload by 14.3× overall and of Node.js on every workload by 2.48× overall; see the [results](benchmarks/results/2026-11-06.md).
+
+The compiler is a single pass over the syntax tree the optimizer already prepared, emitting machine code with an accumulator, spill slots and three callee-saved integer and six `double` registers for the most used locals. It refuses anything it does not understand, and the function then stays interpreted. Every check the interpreter makes is either repeated inline (overflow, division, shifts, conversions, finite results, initialization of private locals) or delegated to the interpreter on a slow path (memory access, pointer arithmetic, library calls), which raises the diagnostic itself. Only the step and depth limits are counted differently, and the default mode compiles only when the step limit is large enough for that to be invisible.
+
+### Verification
+
+All ten test groups pass in Release and AddressSanitizer + UndefinedBehaviorSanitizer builds, in the default mode and with `CTERPRETER_JIT=on`. The 2,100 differential cases against the previous build match exactly. `tests/jit_differential.py` compared interpreted and compiled runs of more than 15,000 generated programs, three quarters of them ending in a diagnostic, without a difference. Every playground and unhinged example prints the same output; Brainfuck's `squares` runs 15× faster.
+
 ## 2026-09-25 — Cterpreter runs Cterpreter
 
 `.load main.c` now works, and calling `main` afterwards starts a second Cterpreter inside the first. The parse-only milestone below listed two blockers: POSIX headers and a way to link several source files. The first was a day's work. The second I did not solve; I sidestepped it. Interpreting `interpreter.c` and its neighbours would put an interpreter under the interpreter at a few hundred times the cost, and every library call it makes would need a shim, so the engine stays native and the interpreted front end reaches it through `src/bridge.c`. The front end really is interpreted; the engine under `ct_eval` is not.

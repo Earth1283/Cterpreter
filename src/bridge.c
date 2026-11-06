@@ -159,6 +159,7 @@ static CtValue create_engine(CtInterpreter *interpreter, Token name) {
     ct_set_limits(child, steps_left(interpreter), frames_left(interpreter));
     ct_set_nesting(child, interpreter->nesting + 1, interpreter->nesting_limit);
     ct_set_strict(child, interpreter->strict);
+    ct_set_jit(child, interpreter->jit_mode);
     return (CtValue){.type = type_pointer(CT_VOID), .as.address = address};
 }
 
@@ -472,6 +473,9 @@ CtValue bridge_call(CtInterpreter *interpreter, Token name, size_t id, const CtV
                            limit > 0 && (unsigned)limit < interpreter->nesting_limit ? (unsigned)limit : interpreter->nesting_limit);
             return nothing();
         }
+        case BR_CT_SET_JIT:
+            if ((child = engine(interpreter, name, args[0], NULL))) ct_set_jit(child, (int)integer_of(interpreter, name, args[1]));
+            return nothing();
         case BR_CT_SET_STRICT:
             if ((child = engine(interpreter, name, args[0], NULL))) ct_set_strict(child, (int)integer_of(interpreter, name, args[1]));
             return nothing();

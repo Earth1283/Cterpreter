@@ -57,6 +57,7 @@ struct Node {
     /* Where that place is within a frame, on the declaration and on each name that uses it. */
     unsigned frame_offset;
     struct Frame *spare_frames; /* N_FUNCTION: frames of finished activations, ready for the next */
+    struct JitCode *jit;        /* N_FUNCTION: its native code, once compilation has been attempted */
     /* The evaluator chosen for this node's shape before execution; NULL means the general one. */
     CtValue (*run)(CtInterpreter *interpreter, Node *node);
     /* A comparison used as a condition can return truth without boxing it. */

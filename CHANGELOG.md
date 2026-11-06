@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+Cterpreter now carries its own compiler: functions compile to x86-64 machine code on their first call, with no external compiler involved. On the twenty-program [performance suite](benchmarks/results/2026-11-06.md) the sum of medians falls from 7,239 to 518.5 ms, **92.8% less time (13.96× faster)**, and the eleven long kernels run 14.7× faster. Cterpreter now beats CPython 3.14.4 on every workload (14.3× over the suite) and Node.js 26.10.0 on every workload (2.48× over the suite). Output, diagnostics and exit status are unchanged: all tests pass with compilation forced on, in Release and sanitizer builds, and the 2,100 differential cases against the previous build are identical.
+
+- `src/jit.c` compiles a function on its first call when the step limit is at least 10,000,000 (`--jit auto`, the default), so that its coarser step and depth accounting cannot change any result; under the default one-million-step limit everything is interpreted as before. `--jit on|off`, `ct_set_jit()` and `CTERPRETER_JIT` choose otherwise; `CTERPRETER_JIT_LOG` explains what compiled, and `CTERPRETER_JIT_DUMP` writes the machine code. `-DCT_NO_JIT=ON` builds without it, as does any machine other than x86-64 Linux or macOS.
+- Native code reaches interpreter memory through per-site caches of its object records and raises every diagnostic through the interpreter's own routines on a slow path, so lifetime, bounds, initialization, overflow, conversion and strict-mode behaviour stay exact. A function the compiler cannot handle stays interpreted; the two call each other freely.
+- Register allocation for integer and `double` locals, immediate operands, shifts for power-of-two division, loop-invariant validation of arrays and pointers in loops that call nothing, inline `ctype.h`, `abs`, `labs`, `sqrt` and `fabs`, and direct self-recursive calls.
+- A later definition that takes the name of a library function a compiled function called sends that function back to be compiled again.
+- `printf`-family formatting writes plain integer conversions itself and formats into a stack buffer, so a loop of `snprintf("%06d")` calls takes a third less time even when interpreted (111 → 75 ms for 300,000 calls).
+- The benchmark runner adds Node.js ports of every workload (`workloads.js`, `--node`, `--no-node`). `tests/jit_differential.py` compares interpreted and compiled runs of generated programs, and CTest runs it and the reference programs with compilation forced on.
+
 Further interpreter optimizations reduce the new nine-program [performance
 suite](benchmarks/results/2026-10-04.md) from 464 to 411 ms, **11.5% less time**
 (1.13× faster) against `b56cba8`. The integer loop takes 26% less time and the

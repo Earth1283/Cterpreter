@@ -1,8 +1,9 @@
 # Performance comparisons
 
-`run.py` races Cterpreter builds against CPython using nine C programs and their
-Python ports in `workloads.py`. It first compiles each C program with the host
-compiler and checks every interpreted run's stdout against that native result.
+`run.py` races Cterpreter builds against CPython and Node.js using C programs
+and their ports in `workloads.py` and `workloads.js`. It first compiles each C
+program with the host compiler and checks every run's stdout, in every
+language, against that native result.
 Unexpected diagnostics or nonzero exit status fail the run. The kernels cover
 recursive and leaf calls, integer and floating arithmetic, arrays, sorting,
 switches and string/ctype builtins.
@@ -22,9 +23,23 @@ python3 benchmarks/run.py \
   --repeats 15 --output build/benchmark-results.json
 ```
 
+The long suite (`--suite long`, or `--suite all`) holds eleven kernels that run
+for 0.2-1.5 s each, so startup is a small fraction of the time: `fib(35)`, an
+8M sieve, 11-queens, Collatz chains, quicksort, 120×120 matrix multiply, LCS
+dynamic programming, a larger Mandelbrot, spectral norm (double-returning
+calls), a 300k-iteration string loop and a 32-bit hash loop. It needs a higher
+step limit and timeout:
+
+```sh
+python3 benchmarks/run.py --engine after=build/bench-after/Cterpreter \
+  --suite long --repeats 9 --max-steps 100000000000 --timeout 600
+```
+
 Python 3.10 or newer is needed for the switch port's `match` statement. A C
 compiler is required for output validation. `--python` selects another Python
-executable; `--cc` selects the native reference compiler. `--case` can be
+executable; `--node` selects the Node.js used for the JavaScript ports, which
+run whenever `node` is on the `PATH` unless `--no-node` is given; `--cc`
+selects the native reference compiler. `--case` can be
 repeated to run a subset. On Linux the runner pins itself and its child
 processes to the first allowed CPU; `--cpu` selects a different allowed CPU.
 
@@ -36,9 +51,16 @@ each timed process. Cterpreter's configuration and history are disabled and
 its execution limit is raised equally for all kernels. Python uses local
 variables inside functions and the same algorithms and sizes; it does not
 replace loops with NumPy or library sorting. Arrays use Python lists or a
-bytearray, so object representations and runtime checks naturally differ.
+bytearray, so object representations and runtime checks naturally differ. The
+JavaScript ports keep the same algorithms with typed arrays for numeric arrays
+and `Math.imul`/`>>> 0` for 32-bit unsigned arithmetic; V8's JIT warms up
+inside each timed process, and Node's startup (about 30 ms here) is included.
 
-The JSON contains every timing, checksums, compiler/Python versions, CPU
+The long suite's limit of 100 billion steps lets Cterpreter compile to native
+code under `--jit auto`. Pass `--jit off` to an engine's command line, by
+building a wrapper script, to time the interpreter alone.
+
+The JSON contains every timing, checksums, compiler/Python/Node versions, CPU
 affinity, and SHA-256 hashes of the binaries and workload sources. The suite's
 total is the sum of the per-workload medians, not a general language speed
 rating. Short workloads are particularly sensitive to startup time and small
@@ -53,4 +75,5 @@ python3 tests/differential.py \
 ctest --test-dir build/bench-after --output-on-failure
 ```
 
-The dated [results](results/2026-10-04.md) record the current optimization pass.
+The dated [results](results/2026-11-06.md) record the native compiler; the
+[previous pass](results/2026-10-04.md) records interpreter optimizations.

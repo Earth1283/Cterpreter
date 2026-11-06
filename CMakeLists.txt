@@ -11,8 +11,13 @@ option(CT_FUZZER "Build the fuzz target with libFuzzer instead of the generated 
 option(CT_REPRODUCIBLE "Strip build paths from the output so that builds are reproducible" ON)
 option(CT_REPRODUCIBLE_TEST "Verify reproducibility by building the core library twice" OFF)
 
-add_library(cterpreter_core src/lexer.c src/parser.c src/interpreter.c src/memory.c src/builtins.c src/preprocessor.c src/types.c src/optimizer.c src/bridge.c src/boot.c src/config.c src/terminal.c)
+option(CT_NO_JIT "Build without the native code compiler, interpreting everything" OFF)
+
+add_library(cterpreter_core src/lexer.c src/parser.c src/interpreter.c src/memory.c src/builtins.c src/preprocessor.c src/types.c src/optimizer.c src/bridge.c src/boot.c src/config.c src/terminal.c src/jit.c)
 target_include_directories(cterpreter_core PUBLIC include PRIVATE src)
+if(CT_NO_JIT)
+    target_compile_definitions(cterpreter_core PRIVATE CT_NO_JIT)
+endif()
 
 add_executable(Cterpreter main.c)
 target_include_directories(Cterpreter PRIVATE src)
@@ -40,6 +45,8 @@ if(BUILD_TESTING)
         add_test(NAME cli COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli.py $<TARGET_FILE:Cterpreter>)
         add_test(NAME self_host COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/self_host.py
                  $<TARGET_FILE:Cterpreter> ${CMAKE_CURRENT_SOURCE_DIR})
+        add_test(NAME jit_differential COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/jit_differential.py
+                 $<TARGET_FILE:Cterpreter> --count 400)
     endif()
     add_executable(core_smoke tests/core_smoke.c)
     target_link_libraries(core_smoke PRIVATE cterpreter_core)
@@ -70,6 +77,9 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME reference_programs
              COMMAND ${CMAKE_COMMAND} -E env CTERPRETER=$<TARGET_FILE:Cterpreter>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/reference.sh ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME reference_programs_native
+             COMMAND ${CMAKE_COMMAND} -E env CTERPRETER=$<TARGET_FILE:Cterpreter> CTERPRETER_JIT=on
                      ${CMAKE_CURRENT_SOURCE_DIR}/tests/reference.sh ${CMAKE_CURRENT_SOURCE_DIR})
     add_test(NAME hello_program COMMAND Cterpreter ${CMAKE_CURRENT_SOURCE_DIR}/examples/basics/hello.c Ada)
     set_tests_properties(hello_program PROPERTIES PASS_REGULAR_EXPRESSION "Hello, Ada!")

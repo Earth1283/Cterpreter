@@ -33,6 +33,8 @@ typedef struct {
     Allocation *find_cache[MEMORY_FIND_CACHE_SIZE];
     uint64_t next_address;
     size_t bytes;
+    /* Advances whenever a record dies or loses initialization, invalidating native access caches. */
+    uint64_t epoch;
     const char *error;
 } Memory;
 

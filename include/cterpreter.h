@@ -58,6 +58,12 @@ void ct_format_value(CtValue value, char *buffer, size_t capacity);
 /* Like ct_format_value, but able to read interpreter memory to expand aggregates. */
 void ct_print_value(CtInterpreter *interpreter, CtValue value, char *buffer, size_t capacity);
 void ct_set_strict(CtInterpreter *interpreter, int strict);
+/* CT_JIT_AUTO compiles functions to native code only under step limits of at
+ * least CT_JIT_AUTO_STEPS, where its approximate step accounting cannot
+ * change which program exceeds the limit. */
+enum { CT_JIT_OFF, CT_JIT_AUTO, CT_JIT_ON };
+#define CT_JIT_AUTO_STEPS 10000000u
+void ct_set_jit(CtInterpreter *interpreter, int mode);
 /* The interpreter's own recursion depth: how many interpret() calls deep it is. */
 unsigned ct_depth(CtInterpreter *interpreter);
 void ct_set_nesting(CtInterpreter *interpreter, unsigned level, unsigned limit);
