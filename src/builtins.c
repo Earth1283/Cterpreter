@@ -352,12 +352,16 @@ static uint64_t pointer(CtInterpreter *interpreter, Token name, CtValue value) {
 }
 
 char *builtin_string(CtInterpreter *interpreter, Token name, CtValue value);
-static char *string(CtInterpreter *interpreter, Token name, CtValue value) {
+static char *string_with_length(CtInterpreter *interpreter, Token name, CtValue value, size_t *length) {
     uint64_t address = pointer(interpreter, name, value);
     if (interpreter->failed) return NULL;
-    char *result = memory_string(&interpreter->memory, address);
+    char *result = memory_string_span(&interpreter->memory, address, length);
     if (!result) (void)runtime_error(interpreter, name, interpreter->memory.error);
     return result;
+}
+
+static char *string(CtInterpreter *interpreter, Token name, CtValue value) {
+    return string_with_length(interpreter, name, value, NULL);
 }
 
 static size_t size_argument(CtInterpreter *interpreter, Token name, CtValue value) {
@@ -523,16 +527,13 @@ static size_t decimal(char *buffer, int value) {
     return length;
 }
 
+enum { FORMAT_LEFT = 1, FORMAT_ZERO = 2, FORMAT_OTHER_FLAG = 4 };
+
 /* What snprintf prints for an integer conversion with only the - and 0 flags,
  * a modest width and no precision; -1 when the case is not that simple. */
-static int quick_integer(char *buffer, size_t capacity, const char *flags, int width, const Conversion *value) {
-    int left = 0, zero = 0;
-    for (; *flags; ++flags) {
-        if (*flags == '-') left = 1;
-        else if (*flags == '0') zero = 1;
-        else return -1;
-    }
-    if (width > 64) return -1;
+static int quick_integer(char *buffer, size_t capacity, int flags, int width, const Conversion *value) {
+    if ((flags & FORMAT_OTHER_FLAG) || width > 64) return -1;
+    int left = flags & FORMAT_LEFT, zero = flags & FORMAT_ZERO;
     char digits[32];
     size_t count = 0;
     int negative = 0;
@@ -599,10 +600,13 @@ static CtValue formatted(CtInterpreter *interpreter, Token name, size_t id, cons
             if (!append(&output, "%", 1)) (void)runtime_error(interpreter, name, "formatted output limit exceeded");
             continue;
         }
-        char spec[128] = "%";
+        char spec[128];
+        spec[0] = '%';
         size_t used = 1;
+        int flags = 0;
         while (format[i] && strchr("-+ #0", format[i])) {
             if (used >= 16) break;
+            flags |= format[i] == '-' ? FORMAT_LEFT : format[i] == '0' ? FORMAT_ZERO : FORMAT_OTHER_FLAG;
             spec[used++] = format[i++];
         }
         int width = 0;
@@ -610,18 +614,20 @@ static CtValue formatted(CtInterpreter *interpreter, Token name, size_t id, cons
             if (argument >= count) { (void)runtime_error(interpreter, name, "missing printf width"); break; }
             width = small(interpreter, name, args[argument++]);
             ++i;
-            if (width < 0) { spec[used++] = '-'; if (width == INT_MIN) width = INT_MAX; else width = -width; }
+            if (width < 0) {
+                spec[used++] = '-';
+                flags |= FORMAT_LEFT;
+                width = width == INT_MIN ? INT_MAX : -width;
+            }
         } else while (isdigit((unsigned char)format[i])) {
             if (width > (int)CT_SOURCE_LIMIT / 10) { width = (int)CT_SOURCE_LIMIT + 1; break; }
             width = width * 10 + format[i++] - '0';
         }
         if (width > (int)CT_SOURCE_LIMIT) { (void)runtime_error(interpreter, name, "printf width exceeds output limit"); break; }
-        size_t flags_end = used;
-        if (width) used += decimal(spec + used, width);
-        int precise = 0;
-        if (format[i] == '.') {
+        int precise = format[i] == '.', precision = -1;
+        if (precise) {
             ++i;
-            int precision = 0;
+            precision = 0;
             if (format[i] == '*') {
                 if (argument >= count) { (void)runtime_error(interpreter, name, "missing printf precision"); break; }
                 precision = small(interpreter, name, args[argument++]);
@@ -631,11 +637,6 @@ static CtValue formatted(CtInterpreter *interpreter, Token name, size_t id, cons
                 precision = precision * 10 + format[i++] - '0';
             }
             if (precision > (int)CT_SOURCE_LIMIT) { (void)runtime_error(interpreter, name, "printf precision exceeds output limit"); break; }
-            if (precision >= 0) {
-                spec[used++] = '.';
-                used += decimal(spec + used, precision);
-            }
-            precise = 1;
         }
         char length = 0;
         int doubled = 0;
@@ -673,24 +674,27 @@ static CtValue formatted(CtInterpreter *interpreter, Token name, size_t id, cons
         if (length == 'L' || ((conversion == 's' || conversion == 'c') && length))
             (void)runtime_error(interpreter, name, "wide strings and long double formats are unsupported");
         if (interpreter->failed) break;
-        if (integer_conversion) spec[used++] = 'j';
         if (conversion == 'p') {
             (void)snprintf(pointer_text, sizeof pointer_text, "0x%" PRIx64, address);
             text = pointer_text;
             conversion = 's';
         }
-        spec[used++] = conversion;
-        spec[used] = '\0';
         Conversion argument_value = {conversion, integer_conversion, text, signed_value, unsigned_value, real_value};
         char inline_piece[128];
         int required = -1;
-        if (integer_conversion && !precise) {
-            char flags[24];
-            memcpy(flags, spec + 1, flags_end - 1);
-            flags[flags_end - 1] = '\0';
+        if (integer_conversion && !precise)
             required = quick_integer(inline_piece, sizeof inline_piece, flags, width, &argument_value);
+        if (required < 0) {
+            if (width) used += decimal(spec + used, width);
+            if (precision >= 0) {
+                spec[used++] = '.';
+                used += decimal(spec + used, precision);
+            }
+            if (integer_conversion) spec[used++] = 'j';
+            spec[used++] = conversion;
+            spec[used] = '\0';
+            required = format_conversion(inline_piece, sizeof inline_piece, spec, &argument_value);
         }
-        if (required < 0) required = format_conversion(inline_piece, sizeof inline_piece, spec, &argument_value);
         if (required < 0 || required > (int)CT_SOURCE_LIMIT) { (void)runtime_error(interpreter, name, "formatted output limit exceeded"); break; }
         char *piece = (size_t)required < sizeof inline_piece ? inline_piece : malloc((size_t)required + 1);
         if (!piece) { (void)runtime_error(interpreter, name, "out of memory"); break; }
@@ -1187,7 +1191,12 @@ CtValue builtin_call(CtInterpreter *interpreter, Token name, size_t id,
         return (CtValue){.type = CT_VOID};
     }
 string_functions:
-    if (id == BI_STRLEN || id == BI_STRCMP || id == BI_STRNCMP || id == BI_STRCPY ||
+    if (id == BI_STRLEN) {
+        size_t length;
+        if (!string_with_length(interpreter, name, args[0], &length)) return integer(0);
+        return integer_of(CT_ULONG, (int64_t)length);
+    }
+    if (id == BI_STRCMP || id == BI_STRNCMP || id == BI_STRCPY ||
         id == BI_STRNCPY || id == BI_STRCAT || id == BI_STRNCAT || id == BI_STRCHR ||
         id == BI_STRRCHR || id == BI_STRSTR || id == BI_STRSPN || id == BI_STRCSPN ||
         id == BI_STRPBRK || id == BI_ATOI || id == BI_ATOL || id == BI_ATOF) {
@@ -1196,7 +1205,6 @@ string_functions:
         char *a = copying ? NULL : string(interpreter, name, args[0]);
         char *b = count > 1 && !character_argument ? string(interpreter, name, args[1]) : NULL;
         if (interpreter->failed) return integer(0);
-        if (id == BI_STRLEN) return integer_of(CT_ULONG, (int64_t)strlen(a));
         if (id == BI_ATOI || id == BI_ATOL) {
             errno = 0;
             long value = strtol(a, NULL, 10);

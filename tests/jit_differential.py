@@ -20,6 +20,30 @@ EDGES = ("0", "1", "-1", "2", "7", "-3", "31", "32", "63", "64", "100", "255", "
          "2147483647", "(-2147483647 - 1)", "4294967295u", "9223372036854775807L", "1e9", "0.5", "-2.5", "1e300")
 
 
+def fixed_cases():
+    yield """#include <stdio.h>
+int add(int a, int b) { return a + b; }
+double calculate(double a, double b) {
+    return (a * a) + (b * (a + (b / (a - (b * (a + (b / (a * b))))))));
+}
+int main(void) {
+    unsigned n = 0x80000001u, shifted = n << 31, old = n++;
+    ++n;
+    n ^= (n >> 13) | shifted;
+    int x = 3;
+    x += (x = 5);
+    double d = calculate(4.0, 2.0);
+    printf("%u %u %u %d %.6f\\n", shifted, old, n, x, d);
+    printf("%d %d %d\\n", x, printf("inner %d\\n", x), add(5, 7));
+    return 0;
+}
+"""
+    for expression, value in (("x << 32", "1"), ("x >> -1", "1"), ("x << 0", "-1"),
+                              ("x << 1", "2147483647"), ("x++", "2147483647")):
+        yield f"int f(int x) {{ return {expression}; }} int main(void) {{ return f({value}); }}"
+    yield "long long f(long long x) { return x << 63; } int main(void) { return (int)f(1); }"
+
+
 class Program:
     def __init__(self, rng):
         self.rng = rng
@@ -181,6 +205,19 @@ class Program:
                 '    printf("%ld %d %d\\n", total, g[3], p[2]);\n    return 0;\n}\n')
 
 
+def compare(binary, source, extra_options, environment, label):
+    options = ["--no-config", "--no-history", "--max-steps", "50000000", *extra_options]
+    results = []
+    for mode in ("off", "on"):
+        run = subprocess.run([binary, *options, "--jit", mode, "-"], input=source.encode(),
+                             capture_output=True, timeout=60, env=environment)
+        results.append((run.returncode, run.stdout, run.stderr))
+    if results[0] != results[1]:
+        raise AssertionError(f"{label}, options {options}\n{source}\n"
+                             f"interpreted={results[0]!r}\nnative={results[1]!r}")
+    return not results[1][2]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary")
@@ -191,21 +228,13 @@ def main():
     rng = random.Random(args.seed)
     # Strict mode raises SIGSEGV on purpose; a sanitizer must not turn that into a report.
     environment = dict(os.environ, ASAN_OPTIONS=":".join(filter(None, (os.environ.get("ASAN_OPTIONS"), "handle_segv=0"))))
+    for index, source in enumerate(fixed_cases()):
+        compare(args.binary, source, [], environment, f"fixed case {index}")
     compiled = 0
     for index in range(args.count):
         source = Program(rng).build()
-        options = ["--no-config", "--no-history", "--max-steps", "50000000"]
-        if index % 5 == 0:
-            options.append("--strict")
-        results = []
-        for mode in ("off", "on"):
-            run = subprocess.run([args.binary, *options, "--jit", mode, "-"], input=source.encode(),
-                                 capture_output=True, timeout=60, env=environment)
-            results.append((run.returncode, run.stdout, run.stderr))
-        if results[0] != results[1]:
-            raise AssertionError(f"case {index}, seed {args.seed}, options {options}\n{source}\n"
-                                 f"interpreted={results[0]!r}\nnative={results[1]!r}")
-        compiled += not results[1][2]
+        options = ["--strict"] if index % 5 == 0 else []
+        compiled += compare(args.binary, source, options, environment, f"case {index}, seed {args.seed}")
     print(f"{args.count} programs agree interpreted and native (seed {args.seed}); {compiled} ran to completion")
 
 

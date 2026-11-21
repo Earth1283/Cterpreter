@@ -128,9 +128,8 @@ Allocation *memory_find_slow(Memory *memory, uint64_t address, size_t cache_slot
     return allocation;
 }
 
-void *memory_access(Memory *memory, uint64_t address, size_t size, int write) {
+static inline void *access_record(Memory *memory, Allocation *allocation, uint64_t address, size_t size, int write) {
     memory->error = NULL;
-    Allocation *allocation = memory_find(memory, address);
     if (!address) memory->error = "null pointer access";
     else if (!allocation) memory->error = "invalid pointer access";
     else if (!allocation->alive) memory->error = "access to an object whose lifetime has ended";
@@ -146,6 +145,10 @@ void *memory_access(Memory *memory, uint64_t address, size_t size, int write) {
         }
     } else if (write == 1) memory_mark(allocation, offset, size);
     return allocation->data + offset;
+}
+
+void *memory_access(Memory *memory, uint64_t address, size_t size, int write) {
+    return access_record(memory, memory_find(memory, address), address, size, write);
 }
 
 void memory_recount(Allocation *allocation) {
@@ -202,23 +205,34 @@ int memory_write(Memory *memory, uint64_t address, CtValue value) {
     return 1;
 }
 
-char *memory_string(Memory *memory, uint64_t address) {
+char *memory_string_span(Memory *memory, uint64_t address, size_t *length) {
     Allocation *allocation = memory_find(memory, address);
-    char *start = memory_access(memory, address, 0, 0);
+    char *start = access_record(memory, allocation, address, 0, 0);
     if (!start) return NULL;
-    size_t available = allocation->size - (size_t)(address - allocation->address);
+    size_t offset = (size_t)(address - allocation->address);
+    size_t available = allocation->size - offset;
     if (allocation->fully_initialized) {
-        if (memchr(start, 0, available)) return start;
-        memory->error = "string is not NUL terminated within its object";
-        return NULL;
-    }
-    for (size_t i = 0; i < available; ++i) {
-        size_t offset = (size_t)(address - allocation->address) + i;
-        if (!allocation->initialized[offset]) { memory->error = "uninitialized byte in string"; return NULL; }
-        if (!start[i]) return start;
+        char *end = memchr(start, 0, available);
+        if (end) {
+            if (length) *length = (size_t)(end - start);
+            return start;
+        }
+    } else {
+        const unsigned char *initialized = allocation->initialized + offset;
+        for (size_t i = 0; i < available; ++i) {
+            if (!initialized[i]) { memory->error = "uninitialized byte in string"; return NULL; }
+            if (!start[i]) {
+                if (length) *length = i;
+                return start;
+            }
+        }
     }
     memory->error = "string is not NUL terminated within its object";
     return NULL;
+}
+
+char *memory_string(Memory *memory, uint64_t address) {
+    return memory_string_span(memory, address, NULL);
 }
 
 void memory_destroy(Memory *memory) {

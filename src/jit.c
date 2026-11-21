@@ -512,12 +512,13 @@ typedef struct {
     int local_bytes, temp_depth, temp_peak, outgoing_peak;
     size_t frame_patch;
     int return_label, entry_label;
+    const Node *last_return;
     CtType returns;
     JitAccess *accesses;
     JitCall *calls;
     Node **assumed;
     size_t assumed_count, assumed_capacity;
-    int right_operand; /* where apply() finds its right operand: rcx unless a register local stands in */
+    int xmm_temps;
     int discarding;    /* the increment being compiled has no use for its old value */
     const char *reason;
     Node *reason_node;
@@ -1448,6 +1449,7 @@ static CtType type_of(Compiler *c, Node *node) {
 
 static CtType gen(Compiler *c, Node *node);
 static void branch(Compiler *c, Node *node, int when, int label);
+static int changes(const Node *node, const Local *local);
 
 /* A constant or a private local: one move puts it in any register, without a helper call. */
 static int simple(Compiler *c, Node *node) {
@@ -1457,11 +1459,11 @@ static int simple(Compiler *c, Node *node) {
     return local && local->storage == LOCAL_SLOT;
 }
 
-/* A private integer or pointer local held in a register with nothing to check before reading it. */
+/* A private local held in a register with nothing to check before reading it. */
 static Local *register_local(Compiler *c, Node *node) {
     if (node->kind != N_NAME || node->resolution != RESOLVE_LOCAL || !node->cache.use.declaration) return NULL;
     Local *local = find_local(c, node->cache.use.declaration);
-    return local && local->storage == LOCAL_SLOT && local->reg >= 0 && !local->flag && !is_real(local->type) ? local : NULL;
+    return local && local->storage == LOCAL_SLOT && local->reg >= 0 && !local->flag ? local : NULL;
 }
 
 static CtType gen_simple(Compiler *c, Node *node, int gpr, int xmm) {
@@ -1498,13 +1500,11 @@ static int condition_code(int op, int is_signed, int real) {
     }
 }
 
-/* Left in rax or xmm0 and right in rcx or xmm1, both of the type the operation uses. */
-static void apply(Compiler *c, int op, Node *node, CtType type, int when, int label) {
-    int right = c->right_operand ? c->right_operand : RCX;
-    c->right_operand = 0;
+/* Left in rax or xmm0, right in the given register, both of the operation's type. */
+static void apply(Compiler *c, int op, Node *node, CtType type, int right, int when, int label) {
     if (comparison(op)) {
         int real = is_real(type);
-        if (real) ucomisd(c, 0, 1);
+        if (real) ucomisd(c, 0, right);
         else alu_rr(c, ALU_CMP, 1, RAX, right);
         int cc = condition_code(op, !real && type_kind(type) != TY_POINTER && type_is_signed(type), real);
         if (label >= 0) jcc(c, when ? cc : cc ^ 1, label);
@@ -1513,14 +1513,14 @@ static void apply(Compiler *c, int op, Node *node, CtType type, int when, int la
     }
     if (is_real(type)) {
         switch (op) {
-            case '+': sse_rr(c, 0xF2, 0x58, 0, 1); break;
-            case '-': sse_rr(c, 0xF2, 0x5C, 0, 1); break;
-            case '*': sse_rr(c, 0xF2, 0x59, 0, 1); break;
+            case '+': sse_rr(c, 0xF2, 0x58, 0, right); break;
+            case '-': sse_rr(c, 0xF2, 0x5C, 0, right); break;
+            case '*': sse_rr(c, 0xF2, 0x59, 0, right); break;
             case '/':
                 sse_rr(c, 0x66, 0x57, 15, 15);
-                ucomisd(c, 1, 15);
+                ucomisd(c, right, 15);
                 jcc(c, CC_E, cold_label(c, node, FAIL_DIVISION));
-                sse_rr(c, 0xF2, 0x5E, 0, 1);
+                sse_rr(c, 0xF2, 0x5E, 0, right);
                 break;
             default: (void)reject(c, node, "operator requires integer operands"); return;
         }
@@ -1567,21 +1567,45 @@ static void apply(Compiler *c, int op, Node *node, CtType type, int when, int la
     }
 }
 
-static void shift(Compiler *c, int op, Node *node, CtType type) {
+static void shift_immediate(Compiler *c, int extension, int w, int reg, int count) {
+    op_rr(c, 0, w, 0xC1, extension, reg, 0);
+    emit(c, (unsigned)count);
+}
+
+/* A negative count denotes a variable shift with its count in rcx. */
+static void shift(Compiler *c, int op, Node *node, CtType type, int count) {
     int width = (int)type_size(type) * 8, w = wide(type);
-    alu_ri(c, ALU_CMP, 1, RCX, width);
-    jcc(c, CC_AE, cold_label(c, node, FAIL_SHIFT));
+    if (count < 0) {
+        alu_ri(c, ALU_CMP, 1, RCX, width);
+        jcc(c, CC_AE, cold_label(c, node, FAIL_SHIFT));
+    } else if (count >= width) {
+        jmp(c, cold_label(c, node, FAIL_SHIFT));
+        return;
+    }
     if (op == TK_SHR) {
-        shift_cl(c, type_is_signed(type) ? 7 : 5, 1, RAX);
+        int extension = type_is_signed(type) ? 7 : 5;
+        if (count < 0) shift_cl(c, extension, 1, RAX);
+        else if (count) shift_immediate(c, extension, 1, RAX, count);
         return;
     }
     if (!type_is_signed(type)) {
-        shift_cl(c, 4, w, RAX);
+        if (count < 0) shift_cl(c, 4, w, RAX);
+        else if (count) shift_immediate(c, 4, w, RAX, count);
         return;
     }
     test_rr(c, 1, RAX, RAX);
     jcc(c, CC_S, cold_label(c, node, FAIL_NEGATIVE_SHIFT));
-    if (w) {
+    if (!count) return;
+    if (count > 0) {
+        int64_t maximum = type_maximum(type) >> count;
+        if (maximum <= INT32_MAX) alu_ri(c, ALU_CMP, 1, RAX, (int32_t)maximum);
+        else {
+            mov_imm(c, RDX, (uint64_t)maximum);
+            alu_rr(c, ALU_CMP, 1, RAX, RDX);
+        }
+        jcc(c, CC_G, cold_label(c, node, FAIL_OVERFLOW));
+        shift_immediate(c, 4, 1, RAX, count);
+    } else if (w) {
         mov_imm(c, RDX, INT64_MAX);
         shift_cl(c, 5, 1, RDX);
         alu_rr(c, ALU_CMP, 1, RAX, RDX);
@@ -1615,11 +1639,6 @@ static int log2_of(int64_t value) {
     return k;
 }
 
-static void shift_immediate(Compiler *c, int extension, int reg, int count) {
-    op_rr(c, 0, 1, 0xC1, extension, reg, 0);
-    emit(c, (unsigned)count);
-}
-
 /* Left in rax, of the type; returns 0 when the operation needs its operand in a register. */
 static int apply_immediate(Compiler *c, int op, Node *node, CtType type, int64_t value, int when, int label) {
     int is_signed = type_is_signed(type), w = wide(type);
@@ -1645,7 +1664,7 @@ static int apply_immediate(Compiler *c, int op, Node *node, CtType type, int64_t
             if (!power_of_two(value)) return 0;
             int k = log2_of(value);
             if (!is_signed) {
-                if (op == '/') { if (k) shift_immediate(c, 5, RAX, k); }
+                if (op == '/') { if (k) shift_immediate(c, 5, 1, RAX, k); }
                 else alu_ri(c, ALU_AND, 1, RAX, (int32_t)(value - 1));
                 return 1;
             }
@@ -1654,11 +1673,14 @@ static int apply_immediate(Compiler *c, int op, Node *node, CtType type, int64_t
                 return 1;
             }
             mov_rr(c, RDX, RAX);
-            shift_immediate(c, 7, RDX, 63);
-            shift_immediate(c, 5, RDX, 64 - k);
+            if (k == 1) shift_immediate(c, 5, 1, RDX, 63);
+            else {
+                shift_immediate(c, 7, 1, RDX, 63);
+                alu_ri(c, ALU_AND, 1, RDX, (int32_t)(value - 1));
+            }
             if (op == '/') {
                 alu_rr(c, ALU_ADD, 1, RAX, RDX);
-                shift_immediate(c, 7, RAX, k);
+                shift_immediate(c, 7, 1, RAX, k);
             } else {
                 lea(c, RCX, RAX, 0);
                 alu_rr(c, ALU_ADD, 1, RCX, RDX);
@@ -1671,8 +1693,17 @@ static int apply_immediate(Compiler *c, int op, Node *node, CtType type, int64_t
     }
 }
 
-/* The left operand is in rax or xmm0, or with left >= 0 in that temporary. */
-static CtType operate(Compiler *c, int op, Node *node, CtType left_type, int left, Node *right, int when, int label) {
+/* These expressions use only scalar registers on the hot path. Their error
+ * paths may call a helper, but never return to the expression. */
+static int local_real_expression(Compiler *c, Node *node) {
+    if (simple(c, node)) return type_of(c, node) == CT_DOUBLE;
+    return node->kind == N_BINARY && (node->token.kind == '+' || node->token.kind == '-' ||
+           node->token.kind == '*' || node->token.kind == '/') &&
+           local_real_expression(c, node->left) && local_real_expression(c, node->right);
+}
+
+/* The left operand is in rax or xmm0. */
+static CtType operate(Compiler *c, int op, Node *node, CtType left_type, Node *right, int when, int label) {
     CtType right_type = type_of(c, right);
     if (c->failed) return CT_VOID;
     int pointers = type_is_pointer(left_type) || type_is_pointer(right_type);
@@ -1681,6 +1712,12 @@ static CtType operate(Compiler *c, int op, Node *node, CtType left_type, int lef
         if (!type_is_integer(left_type) || !type_is_integer(right_type)) return reject(c, node, "shift of a non-integer"), CT_VOID;
         left_target = result = type_promote(left_type);
         right_target = type_promote(right_type);
+        if (right->kind == N_VALUE) {
+            uint64_t count = right->token.value.as.unsigned_integer;
+            convert(c, left_type, left_target, 0, node, RAX, 0);
+            shift(c, op, node, result, count < 64 ? (int)count : 64);
+            return result;
+        }
     } else if (!pointers) {
         if (!arithmetic(left_type) || !arithmetic(right_type)) return reject(c, node, "operator on a non-number"), CT_VOID;
         left_target = right_target = type_common(left_type, right_type);
@@ -1688,58 +1725,69 @@ static CtType operate(Compiler *c, int op, Node *node, CtType left_type, int lef
     }
     int64_t immediate;
     if (!pointers && op != TK_SHL && op != TK_SHR && !is_real(left_target) && immediate_of(right, right_target, &immediate)) {
-        if (left >= 0) reload(c, left_type, left, RAX, 0);
         convert(c, left_type, left_target, 0, node, RAX, 0);
         if (c->failed) return CT_VOID;
         if (apply_immediate(c, op, node, left_target, immediate, when, label)) return result;
         mov_imm(c, RCX, (uint64_t)immediate);
-        apply(c, op, node, left_target, when, label);
+        apply(c, op, node, left_target, RCX, when, label);
         return result;
     }
     Local *in_register = register_local(c, right);
-    if (in_register && !pointers && op != TK_SHL && op != TK_SHR && type_is_integer(right_target) &&
-        integer_fits(in_register->type, right_target)) {
-        if (left >= 0) reload(c, left_type, left, RAX, 0);
+    if (in_register && !pointers && op != TK_SHL && op != TK_SHR &&
+        (is_real(right_target) ? is_real(in_register->type) : integer_fits(in_register->type, right_target))) {
         convert(c, left_type, left_target, 0, node, RAX, 0);
         if (c->failed) return CT_VOID;
-        c->right_operand = in_register->reg;
-        apply(c, op, node, left_target, when, label);
+        apply(c, op, node, left_target, in_register->reg, when, label);
         return result;
     }
     if (simple(c, right)) {
         CtType loaded = gen_simple(c, right, RCX, 1);
         convert(c, loaded, right_target, 0, right, RCX, 1);
-        if (left >= 0) reload(c, left_type, left, RAX, 0);
     } else {
-        if (left < 0) {
-            left = temp_push(c);
-            spill(c, left_type, left);
-        } else temp_push(c);
+        Local *local = register_local(c, node->left);
+        if (local && changes(right, local)) local = NULL;
+        int saved = -1, left = 0;
+        if (!local) {
+            if (left_type == CT_DOUBLE && c->xmm_temps < 6 && local_real_expression(c, right)) {
+                /* xmm2-7 are outside the expression and local register ranges. */
+                saved = 2 + c->xmm_temps++;
+                movapd(c, saved, 0);
+            } else {
+                left = temp_push(c);
+                spill(c, left_type, left);
+            }
+        }
         CtType generated = gen(c, right);
         if (generated != right_type) return reject(c, right, "inconsistent type"), CT_VOID;
         convert(c, right_type, right_target, 0, right, RAX, 0);
         if (is_real(right_target)) movapd(c, 1, 0);
         else mov_rr(c, RCX, RAX);
-        reload(c, left_type, left, RAX, 0);
-        temp_pop(c);
+        if (local) read_local(c, local, node->left, RAX, 0);
+        else if (saved >= 0) {
+            movapd(c, 0, saved);
+            --c->xmm_temps;
+        } else {
+            reload(c, left_type, left, RAX, 0);
+            temp_pop(c);
+        }
     }
     convert(c, left_type, left_target, 0, node, RAX, 0);
     if (c->failed) return CT_VOID;
     if (op == TK_SHL || op == TK_SHR) {
-        shift(c, op, node, result);
+        shift(c, op, node, result, -1);
         return result;
     }
     if (!pointers) {
-        apply(c, op, node, left_target, when, label);
+        apply(c, op, node, left_target, is_real(left_target) ? 1 : RCX, when, label);
         return result;
     }
     if (type_is_pointer(left_type) && type_is_pointer(right_type) && (op == TK_EQ || op == TK_NE)) {
-        apply(c, op, node, left_type, when, label);
+        apply(c, op, node, left_type, RCX, when, label);
         return CT_INT;
     }
     int null_right = right->kind == N_VALUE && type_is_integer(right_type) && !right->token.value.as.integer;
     if ((op == TK_EQ || op == TK_NE) && null_right) {
-        apply(c, op, node, left_type, when, label);
+        apply(c, op, node, left_type, RCX, when, label);
         return CT_INT;
     }
     if ((op == '+' || op == '-') && type_is_pointer(left_type) && type_is_integer(right_type)) {
@@ -2114,13 +2162,7 @@ static CtType assign(Compiler *c, Node *node) {
     if (op == '=') gen_as(c, node->right, place.type, node);
     else {
         load_place(c, &place, node);
-        int left = -1;
-        if (!simple(c, node->right)) {
-            left = temp_push(c);
-            spill(c, place.type, left);
-        }
-        CtType type = operate(c, base_operator(op), node, place.type, left, node->right, 0, -1);
-        if (left >= 0) temp_pop(c);
+        CtType type = operate(c, base_operator(op), node, place.type, node->right, 0, -1);
         convert(c, type, place.type, 0, node, RAX, 0);
     }
     store_place(c, &place, node);
@@ -2130,21 +2172,38 @@ static CtType assign(Compiler *c, Node *node) {
 
 static CtType step(Compiler *c, Node *node) {
     int op = node->token.kind == TK_INCREMENT ? '+' : '-';
-    int keep_old = node->kind == N_POSTFIX && !c->discarding;
+    int discarded = c->discarding;
+    int keep_old = node->kind == N_POSTFIX && !discarded;
     c->discarding = 0;
     Lplace place;
     if (!lvalue(c, node->left, node, &place, 1)) return CT_VOID;
     CtType type = place.type;
+    Local *local = place.kind == PLACE_LOCAL ? place.local : NULL;
+    if (local && local->reg >= 0 && !local->flag && !place.readonly &&
+        type_is_integer(type) && type_promote(type) == type) {
+        int reg = local->reg;
+        if (keep_old) mov_rr(c, RAX, reg);
+        alu_ri(c, op == '+' ? ALU_ADD : ALU_SUB, wide(type), reg, 1);
+        if (type_is_signed(type)) {
+            jcc(c, CC_O, cold_label(c, node, FAIL_OVERFLOW));
+            if (!wide(type)) canonical(c, type, reg);
+        }
+        if (!discarded && !keep_old) mov_rr(c, RAX, reg);
+        return type;
+    }
     load_place(c, &place, node);
-    int old = temp_push(c);
-    if (keep_old) spill(c, type, old);
+    int old = 0;
+    if (keep_old) {
+        old = temp_push(c);
+        spill(c, type, old);
+    }
     if (type_is_pointer(type)) {
         mov_imm(c, RCX, 1);
         JitAccess *access = new_access(c, node, type, CT_INT, type_target(type), 0);
         if (access) pointer_offset(c, access, op);
     } else if (is_real(type)) {
         load_real_constant(c, 1, 1.0);
-        apply(c, op, node, CT_DOUBLE, 0, -1);
+        apply(c, op, node, CT_DOUBLE, 1, 0, -1);
     } else {
         CtType common = type_common(type, CT_INT);
         convert(c, type, common, 0, node, RAX, 0);
@@ -2152,8 +2211,10 @@ static CtType step(Compiler *c, Node *node) {
         convert(c, common, type, 0, node, RAX, 0);
     }
     store_place(c, &place, node);
-    if (keep_old) reload(c, type, old, RAX, 0);
-    temp_pop(c);
+    if (keep_old) {
+        reload(c, type, old, RAX, 0);
+        temp_pop(c);
+    }
     release_place(c, &place);
     return type;
 }
@@ -2171,13 +2232,19 @@ static void assume_library(Compiler *c, Node *name) {
 
 static JitCode *code_for(CtInterpreter *interpreter, Node *function);
 
+static void outgoing_value(Compiler *c, size_t index, CtType type) {
+    int32_t offset = (int32_t)(sizeof(CtValue) * index);
+    op_rm(c, 0, 0, 0xC7, 0, RSP, offset, 0);
+    emit32(c, (uint32_t)type);
+    offset += (int32_t)offsetof(CtValue, as);
+    if (is_real(type)) movsd_store(c, RSP, offset, 0);
+    else store64(c, RSP, offset, RAX);
+}
+
 static void outgoing_values(Compiler *c, size_t count, const int *temps, const CtType *types) {
-    if ((int)(16 * count) > c->outgoing_peak) c->outgoing_peak = (int)(16 * count);
     for (size_t i = 0; i < count; ++i) {
-        op_rm(c, 0, 0, 0xC7, 0, RSP, (int32_t)(16 * i), 0);
-        emit32(c, (uint32_t)types[i]);
-        load64(c, RAX, RBP, temps[i]);
-        store64(c, RSP, (int32_t)(16 * i + 8), RAX);
+        reload(c, types[i], temps[i], RAX, 0);
+        outgoing_value(c, i, types[i]);
     }
 }
 
@@ -2257,7 +2324,7 @@ static void intrinsic(Compiler *c, int kind, size_t which, CtType argument, int 
             return;
         case INTRINSIC_ABS: case INTRINSIC_LABS:
             mov_rr(c, RCX, RAX);
-            shift_immediate(c, 7, RCX, 63);
+            shift_immediate(c, 7, 1, RCX, 63);
             alu_rr(c, ALU_XOR, 1, RAX, RCX);
             alu_rr(c, ALU_SUB, 1, RAX, RCX);
             if (kind == INTRINSIC_ABS) {
@@ -2306,10 +2373,17 @@ static CtType call(Compiler *c, Node *node) {
     int temps[16], callee_temp = 0;
     CtType types[16], pointer = CT_VOID;
     Node *parameter = function ? function->left : NULL;
+    int first_temp = c->temp_depth;
+    /* Calls inside arguments reuse this frame's outgoing area. A one-argument
+     * library intrinsic also needs a saved copy for its fallback. */
+    int write_directly = !function && count > 1 && !calls_out(node->right);
     if (function) {
         size_t parameters = 0;
         for (Node *p = function->left; p; p = p->next) ++parameters;
         if (parameters != count || function->variadic) return reject(c, node, "argument count"), CT_VOID;
+    } else {
+        int outgoing = (int)(sizeof(CtValue) * count);
+        if (outgoing > c->outgoing_peak) c->outgoing_peak = outgoing;
     }
     if (!direct) {
         pointer = gen(c, pointer_callee(c, node->left));
@@ -2326,8 +2400,11 @@ static CtType call(Compiler *c, Node *node) {
             parameter = parameter->next;
         } else if (type == CT_VOID) return reject(c, a, "void argument"), CT_VOID;
         types[index] = type;
-        temps[index] = temp_push(c);
-        if (!function || a->next) spill(c, type, temps[index]);
+        if (write_directly) outgoing_value(c, index, type);
+        else if (!function || a->next) {
+            temps[index] = temp_push(c);
+            spill(c, type, temps[index]);
+        }
     }
     if (function) {
         JitCode *callee = code_for(c->interpreter, function);
@@ -2375,7 +2452,7 @@ static CtType call(Compiler *c, Node *node) {
             bind(c, done);
             open_cold(c, fallback, &saved);
         }
-        outgoing_values(c, count, temps, types);
+        if (!write_directly) outgoing_values(c, count, temps, types);
         mov_rr(c, RDX, RSP);
         mov_pointer(c, RSI, site);
         mov_rr(c, RDI, R15);
@@ -2388,7 +2465,7 @@ static CtType call(Compiler *c, Node *node) {
         site->count = count;
         site->result = result;
         site->pointer = pointer;
-        outgoing_values(c, count, temps, types);
+        if (!write_directly) outgoing_values(c, count, temps, types);
         mov_rr(c, RCX, RSP);
         load64(c, RDX, RBP, callee_temp);
         mov_pointer(c, RSI, site);
@@ -2396,8 +2473,7 @@ static CtType call(Compiler *c, Node *node) {
         call_interpreter(c, (Helper)jit_call_pointer);
         finish_value(c, result);
     }
-    for (size_t i = 0; i < count; ++i) temp_pop(c);
-    if (!direct) temp_pop(c);
+    c->temp_depth = first_temp;
     return result;
 }
 
@@ -2643,7 +2719,7 @@ static void view_element(Compiler *c, View *view, Node *index_node, CtType index
         jcc(c, CC_NE, miss);
     }
     if (view->width > 1) {
-        if (power_of_two((int64_t)view->width)) shift_immediate(c, 4, RCX, log2_of((int64_t)view->width));
+        if (power_of_two((int64_t)view->width)) shift_immediate(c, 4, 1, RCX, log2_of((int64_t)view->width));
         else imul_ri(c, 1, RCX, RCX, (int32_t)view->width);
     }
     alu_rm(c, ALU_ADD, 1, RCX, RBP, view->slots + (store ? 8 : 0));
@@ -2869,7 +2945,7 @@ static CtType gen(Compiler *c, Node *node) {
             if (is_assignment(op)) return assign(c, node);
             if (op == TK_AND || op == TK_OR) return gen_logical(c, node);
             CtType left = gen(c, node->left);
-            return operate(c, op, node, left, -1, node->right, 0, -1);
+            return operate(c, op, node, left, node->right, 0, -1);
         }
         default: return reject(c, node, "unsupported expression"), CT_VOID;
     }
@@ -2936,7 +3012,7 @@ static void branch(Compiler *c, Node *node, int when, int label) {
     }
     if (node->kind == N_BINARY && comparison(node->token.kind)) {
         CtType left = gen(c, node->left);
-        (void)operate(c, node->token.kind, node, left, -1, node->right, when, label);
+        (void)operate(c, node->token.kind, node, left, node->right, when, label);
         return;
     }
     CtType type = gen(c, node);
@@ -2982,6 +3058,7 @@ static size_t weight(const Node *node) {
 }
 
 static void statement(Compiler *c, Node *node);
+static void emit_return(Compiler *c);
 
 static void release_from(Compiler *c, size_t live) {
     for (size_t i = c->live_count; i-- > live;) {
@@ -3332,7 +3409,10 @@ static void statement(Compiler *c, Node *node) {
                 if (c->returns != CT_VOID) reload(c, c->returns, value, RAX, 0);
                 temp_pop(c);
             }
-            jmp(c, c->return_label);
+            if (node != c->last_return) {
+                if (!c->xmm_count && c->saved_count <= 1) emit_return(c);
+                else jmp(c, c->return_label);
+            }
             return;
         }
         case N_SWITCH: switch_statement(c, node); return;
@@ -3519,12 +3599,13 @@ static void prologue(Compiler *c) {
     }
 }
 
-static void epilogue(Compiler *c) {
-    bind(c, c->return_label);
+static void emit_return(Compiler *c) {
     for (int i = 0; i < c->xmm_count; ++i) movsd_load(c, c->xmm_locals[i]->reg, RBP, c->xmm_saves[i]);
-    lea(c, RSP, RBP, -8 * c->saved_count);
-    for (int i = c->saved_count; i-- > 0;) pop(c, c->saved[i]);
-    pop(c, RBP);
+    if (c->saved_count) {
+        lea(c, RSP, RBP, -8 * c->saved_count);
+        for (int i = c->saved_count; i-- > 0;) pop(c, c->saved[i]);
+        pop(c, RBP);
+    } else emit(c, 0xC9); /* leave */
     emit(c, 0xC3);
 }
 
@@ -3589,13 +3670,17 @@ static int compile_body(Compiler *c) {
     bind(c, c->entry_label);
     prologue(c);
     tick(c, function, list_weight(function->right->left) + 1);
+    for (Node *node = function->right->left; node; node = node->next)
+        if (!node->next && node->kind == N_RETURN) c->last_return = node;
     sequence(c, function->right->left);
     if (c->failed) return 0;
-    close_scope(c, 0);
-    if (c->returns == CT_VOID) {}
-    else if (is_main(function)) mov_imm(c, RAX, 0);
-    else jmp(c, cold_label(c, function, FAIL_NO_RETURN));
-    epilogue(c);
+    if (!c->last_return) {
+        close_scope(c, 0);
+        if (is_main(function)) mov_imm(c, RAX, 0);
+        else if (c->returns != CT_VOID) jmp(c, cold_label(c, function, FAIL_NO_RETURN));
+    }
+    bind(c, c->return_label);
+    emit_return(c);
     int frame = c->saved_count * 8 + c->local_bytes + 8 * c->temp_peak + c->outgoing_peak;
     frame = (frame + 15) & ~15;
     int32_t adjust = frame - c->saved_count * 8;

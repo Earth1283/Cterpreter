@@ -115,6 +115,7 @@ static inline void memory_encode(unsigned char *data, CtValue value) {
 CtValue memory_read(Memory *memory, uint64_t address, CtType type);
 int memory_write(Memory *memory, uint64_t address, CtValue value);
 char *memory_string(Memory *memory, uint64_t address);
+char *memory_string_span(Memory *memory, uint64_t address, size_t *length);
 void memory_destroy(Memory *memory);
 
 #endif
